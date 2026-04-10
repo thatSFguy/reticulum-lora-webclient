@@ -14,6 +14,12 @@ import { openDatabase, saveIdentity, loadIdentity, saveContact, getContact, getA
 
 const $ = id => document.getElementById(id);
 
+function hexToBytes(hex) {
+  const out = new Uint8Array(hex.length / 2);
+  for (let i = 0; i < out.length; i++) out[i] = parseInt(hex.substr(i * 2, 2), 16);
+  return out;
+}
+
 // Logging — declared early so error handlers can use it
 function log(cls, msg) {
   const el = $('log');
@@ -76,7 +82,10 @@ async function initIdentity() {
   for (const c of savedContacts) {
     const identity = new Identity();
     await identity.loadFromPublicKey(new Uint8Array(c.publicKey));
-    contacts.set(c.hash, { ...c, identity });
+    // destHash may be stored as array; fall back to decoding the hex hash field
+    // for legacy records saved before destHash was persisted.
+    const destHash = c.destHash ? new Uint8Array(c.destHash) : hexToBytes(c.hash);
+    contacts.set(c.hash, { ...c, identity, destHash });
   }
   renderContactList();
 }
@@ -138,11 +147,13 @@ async function handleAnnounce(pkt, rssi) {
   if (!valid) return;
 
   // Store contact
-  const destHashHex = announce.destHash ? toHex(announce.destHash) : toHex(pkt.destHash);
+  const destHashBytes = announce.destHash || pkt.destHash;
+  const destHashHex = toHex(destHashBytes);
   const contact = {
     hash: destHashHex,
     identityHash: idHash,
     publicKey: Array.from(announce.publicKey),
+    destHash: Array.from(destHashBytes),
     displayName,
     lastSeen: Date.now(),
     rssi,
@@ -150,7 +161,7 @@ async function handleAnnounce(pkt, rssi) {
 
   const identity = new Identity();
   await identity.loadFromPublicKey(announce.publicKey);
-  contacts.set(destHashHex, { ...contact, identity, destHash: announce.destHash || pkt.destHash });
+  contacts.set(destHashHex, { ...contact, identity, destHash: destHashBytes });
 
   await saveContact(contact);
   renderContactList();
