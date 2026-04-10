@@ -348,7 +348,6 @@ $('btn-connect').addEventListener('click', async () => {
     log('ok', `RNode FW ${fw?.major}.${fw?.minor}, Bat ${battery}%`);
 
     // Show panels
-    $('identity-panel').classList.remove('hidden');
     $('config-panel').classList.remove('hidden');
     $('messaging-panel').classList.remove('hidden');
 
@@ -366,7 +365,6 @@ $('btn-disconnect').addEventListener('click', async () => {
   $('conn-dot').classList.remove('on');
   $('conn-text').textContent = 'Disconnected';
   $('btn-disconnect').classList.add('hidden');
-  $('identity-panel').classList.add('hidden');
   $('config-panel').classList.add('hidden');
   $('messaging-panel').classList.add('hidden');
   radioOn = false;

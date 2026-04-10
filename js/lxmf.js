@@ -12,6 +12,7 @@
 
 'use strict';
 
+import { encode as msgpackEncode, decode as msgpackDecode } from '@msgpack/msgpack';
 import { Identity, sha256 } from './identity.js';
 import { concatBytes } from './announce.js';
 import { TRUNCATED_HASHLENGTH, SIGLENGTH } from './reticulum.js';
@@ -33,8 +34,7 @@ export async function unpackMessage(data, destHash) {
   const msgpackData = data.subarray(TRUNCATED_HASHLENGTH + SIGNATURE_LENGTH);
 
   // Decode msgpack payload
-  if (!window.msgpack) throw new Error('msgpack library not loaded');
-  const payload = window.msgpack.decode(msgpackData);
+  const payload = msgpackDecode(msgpackData);
 
   if (!Array.isArray(payload) || payload.length < 4) {
     throw new Error('Invalid LXMF payload structure');
@@ -49,7 +49,7 @@ export async function unpackMessage(data, destHash) {
   // Compute message hash for verification
   // For stamp handling: rebuild msgpack without stamp for hash
   const msgpackForHash = stamp !== null
-    ? window.msgpack.encode([timestamp, payload[1], payload[2], fields])
+    ? msgpackEncode([timestamp, payload[1], payload[2], fields])
     : msgpackData;
 
   const hashedPart = concatBytes([destHash, sourceHash, msgpackForHash]);
@@ -83,8 +83,7 @@ export async function packMessage(sourceIdentity, destHash, sourceHash, title, c
   const timestamp    = Date.now() / 1000;  // float seconds
 
   // Msgpack encode payload
-  if (!window.msgpack) throw new Error('msgpack library not loaded');
-  const msgpackData = window.msgpack.encode([timestamp, titleBytes, contentBytes, fields]);
+  const msgpackData = new Uint8Array(msgpackEncode([timestamp, titleBytes, contentBytes, fields]));
 
   // Compute message hash
   const hashedPart = concatBytes([destHash, sourceHash, msgpackData]);

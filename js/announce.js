@@ -8,6 +8,7 @@
 
 'use strict';
 
+import { ed25519 } from '@noble/curves/ed25519';
 import { Identity, computeDestinationHash, computeNameHash, sha256, truncatedHash } from './identity.js';
 import { KEYSIZE, SIGLENGTH, NAME_HASH_LENGTH, TRUNCATED_HASHLENGTH } from './reticulum.js';
 import { toHex } from './kiss.js';
@@ -66,7 +67,6 @@ export function validateAnnounce(announce, destHashFromHeader) {
   const signedData = concatBytes(parts);
   const sigPubKey = publicKey.subarray(32, 64);  // Ed25519 public key
 
-  const { ed25519 } = getNoble();
   try {
     return ed25519.verify(signature, signedData, sigPubKey);
   } catch {
@@ -122,11 +122,6 @@ function arraysEqual(a, b) {
     if (a[i] !== b[i]) return false;
   }
   return true;
-}
-
-function getNoble() {
-  if (!window.noble_ed25519) throw new Error('@noble/curves not loaded');
-  return { ed25519: window.noble_ed25519 };
 }
 
 export { concatBytes, arraysEqual };

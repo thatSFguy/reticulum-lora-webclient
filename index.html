@@ -31,7 +31,7 @@
 </div>
 
 <!-- Identity panel -->
-<div id="identity-panel" class="panel hidden">
+<div id="identity-panel" class="panel">
   <h2>Your Identity</h2>
   <div class="row">
     <div class="field wide">
@@ -127,16 +127,14 @@
   </div>
 </details>
 
-<!-- Libraries (CDN, no build step) -->
-<script src="https://cdn.jsdelivr.net/npm/@noble/curves@1.8.1/ed25519.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/@noble/curves@1.8.1/x25519.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/@msgpack/msgpack@3.0.0-beta2/dist.es5+umd/msgpack.min.js"></script>
-<script>
-  // Expose noble curves on window for ES module access
-  // The CDN builds expose ed25519 and x25519 on their own globals
-  window.noble_ed25519 = window.ed25519 || (typeof ed25519 !== 'undefined' ? ed25519 : null);
-  window.noble_x25519 = window.x25519 || (typeof x25519 !== 'undefined' ? x25519 : null);
-  // msgpack is exposed as window.msgpack by the UMD build
+<!-- Import map: resolve bare specifiers to esm.sh CDN -->
+<script type="importmap">
+{
+  "imports": {
+    "@noble/curves/ed25519": "https://esm.sh/@noble/curves@1.8.1/ed25519",
+    "@msgpack/msgpack": "https://esm.sh/@msgpack/msgpack@3.0.0-beta2"
+  }
+}
 </script>
 <script type="module" src="js/app.js"></script>
 </body>

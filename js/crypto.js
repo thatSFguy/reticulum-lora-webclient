@@ -6,12 +6,8 @@
 
 'use strict';
 
+import { x25519 } from '@noble/curves/ed25519';
 import { concatBytes } from './announce.js';
-
-function getNoble() {
-  if (!window.noble_x25519) throw new Error('@noble/curves not loaded');
-  return { x25519: window.noble_x25519 };
-}
 
 // ---- HKDF (HMAC-SHA256) using Web Crypto API -------------------------
 
@@ -102,8 +98,6 @@ async function tokenDecrypt(derivedKey, token) {
 // Encrypt plaintext for a recipient's X25519 public key.
 // Returns: ephemeral_pubkey(32) + token
 export async function encrypt(plaintext, recipientEncPubKey, recipientIdentityHash) {
-  const { x25519 } = getNoble();
-
   // Generate ephemeral X25519 keypair
   const ephPriv = x25519.utils.randomPrivateKey();
   const ephPub  = x25519.getPublicKey(ephPriv);
@@ -124,8 +118,6 @@ export async function encrypt(plaintext, recipientEncPubKey, recipientIdentityHa
 // ciphertext = ephemeral_pubkey(32) + token
 export async function decrypt(ciphertext, ourEncPrivKey, ourIdentityHash) {
   if (ciphertext.length < 32 + 48) throw new Error('Ciphertext too short');
-
-  const { x25519 } = getNoble();
 
   const ephPub = ciphertext.subarray(0, 32);
   const token  = ciphertext.subarray(32);
