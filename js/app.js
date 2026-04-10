@@ -6,10 +6,18 @@ import { encode as msgpackEncode } from '@msgpack/msgpack';
 import { RNode } from './rnode.js';
 import { toHex } from './kiss.js';
 import { Identity, computeDestinationHash, computeNameHash } from './identity.js';
-import { parsePacket, buildPacket, PACKET_ANNOUNCE, PACKET_DATA, DEST_SINGLE, HEADER_1, PACKET_TYPE_NAMES } from './reticulum.js';
+import { parsePacket, buildPacket, PACKET_ANNOUNCE, PACKET_DATA, PACKET_LINKREQ, PACKET_PROOF, DEST_SINGLE, DEST_LINK, HEADER_1, PACKET_TYPE_NAMES } from './reticulum.js';
 import { parseAnnounce, validateAnnounce, buildAnnounce, extractDisplayName, concatBytes, arraysEqual } from './announce.js';
 import { encrypt, decrypt } from './crypto.js';
-import { unpackMessage, verifyMessageSignature, packMessage } from './lxmf.js';
+import { unpackMessage, unpackLinkMessage, verifyMessageSignature, packMessage } from './lxmf.js';
+import { Link, LINK_ACTIVE, LINK_CLOSED } from './link.js';
+
+// Reticulum packet context values relevant to link traffic
+const CTX_NONE      = 0x00;
+const CTX_KEEPALIVE = 0xFA;
+const CTX_LINKCLOSE = 0xFC;
+const CTX_LRRTT     = 0xFE;
+const CTX_LRPROOF   = 0xFF;
 import { openDatabase, saveIdentity, loadIdentity, saveContact, getContact, getAllContacts, deleteContact, deleteMessagesForContact, saveMessage, getMessages } from './store.js';
 
 const $ = id => document.getElementById(id);
@@ -50,6 +58,7 @@ let myDestHash = null;     // Our LXMF destination hash (16 bytes)
 let contacts = new Map();  // hash_hex → { hash, publicKey, displayName, destHash, identity }
 let activeContactHash = null;
 let radioOn = false;
+let links = new Map();     // hex link_id → Link instance (incoming links only)
 
 rnode._onLog = (msg) => log('info', msg);
 
@@ -105,18 +114,22 @@ async function onPacket(data, rssi, snr) {
   if (pkt.packetType === PACKET_ANNOUNCE) {
     await handleAnnounce(pkt, rssi);
   } else if (pkt.packetType === PACKET_DATA) {
-    await handleData(pkt, rssi);
-  } else if (pkt.packetType === 2 /* LINKREQ */) {
-    // Sideband is trying to establish a Link instead of opportunistic delivery.
-    // We don't support links yet — log it so user knows.
-    const dh = toHex(pkt.destHash);
-    if (myDestHash && arraysEqual(pkt.destHash, myDestHash)) {
-      log('err', `  LINKREQUEST addressed to us — link establishment not supported (use opportunistic delivery)`);
+    if (pkt.destType === DEST_LINK) {
+      await handleLinkData(pkt, rssi);
     } else {
-      log('info', `  LINKREQUEST dest=${dh.substring(0,16)}... (not for us)`);
+      await handleData(pkt, rssi);
     }
-  } else if (pkt.packetType === 3 /* PROOF */) {
-    // Proof packets are responses to LINKREQUEST or RESOURCE etc.
+  } else if (pkt.packetType === PACKET_LINKREQ) {
+    if (myDestHash && arraysEqual(pkt.destHash, myDestHash)) {
+      await handleLinkRequest(pkt);
+    } else {
+      log('info', `  LINKREQUEST dest=${toHex(pkt.destHash).substring(0,16)}... (not for us)`);
+    }
+  } else if (pkt.packetType === PACKET_PROOF) {
+    // PROOF packets we might see: LRPROOF from a responder to some
+    // initiator on the mesh (we never initiate links), and packet
+    // proofs for opportunistic messages we've sent. Both are fine to
+    // ignore at this layer.
   }
 }
 
@@ -187,53 +200,135 @@ async function handleData(pkt, rssi) {
     // The packet data (after RNS header) is the encrypted LXMF payload
     const plaintext = await decrypt(pkt.payload, myIdentity.encPrivKey, myIdentity.hash);
 
-    // Unpack LXMF message
+    // Unpack LXMF message (opportunistic form: dest hash stripped)
     const msg = await unpackMessage(plaintext, myDestHash);
-
-    // Look up sender
-    const sourceHashHex = toHex(msg.sourceHash);
-    let senderName = sourceHashHex.substring(0, 8);
-
-    // Try to find contact by identity hash matching
-    for (const [hash, c] of contacts) {
-      if (c.identityHash === sourceHashHex || hash === sourceHashHex) {
-        senderName = c.displayName;
-
-        // Verify signature
-        const valid = verifyMessageSignature(msg, c.identity);
-        log(valid ? 'ok' : 'err', `  Signature: ${valid ? 'valid' : 'INVALID'}`);
-        break;
-      }
-    }
-
-    log('ok', `  Message from "${senderName}": ${msg.content}`);
-
-    // Find the contact hash for this sender
-    let contactHash = null;
-    for (const [hash, c] of contacts) {
-      if (c.identityHash === sourceHashHex) {
-        contactHash = hash;
-        break;
-      }
-    }
-
-    // Save message
-    const savedMsg = {
-      contactHash: contactHash || sourceHashHex,
-      direction: 'incoming',
-      content: msg.content,
-      title: msg.title,
-      timestamp: msg.timestamp * 1000,
-      rssi,
-    };
-    await saveMessage(savedMsg);
-
-    // Update UI if viewing this conversation
-    if (activeContactHash === savedMsg.contactHash) {
-      await renderMessages(activeContactHash);
-    }
+    await dispatchIncomingMessage(msg, rssi);
   } catch (e) {
     log('err', `  Decrypt/parse failed: ${e.message}`);
+  }
+}
+
+// Common post-decrypt handling shared between opportunistic (handleData)
+// and link-delivered (handleLinkData) inbound LXMF messages. Takes an
+// already-unpacked LXMF message object and the RSSI of the carrying packet.
+async function dispatchIncomingMessage(msg, rssi) {
+  const sourceHashHex = toHex(msg.sourceHash);
+  let senderName = sourceHashHex.substring(0, 8);
+  let contactHash = null;
+
+  for (const [hash, c] of contacts) {
+    if (c.identityHash === sourceHashHex || hash === sourceHashHex) {
+      senderName = c.displayName;
+      contactHash = hash;
+      const valid = verifyMessageSignature(msg, c.identity);
+      log(valid ? 'ok' : 'err', `  Signature: ${valid ? 'valid' : 'INVALID'}`);
+      break;
+    }
+  }
+
+  log('ok', `  Message from "${senderName}": ${msg.content}`);
+
+  const savedMsg = {
+    contactHash: contactHash || sourceHashHex,
+    direction: 'incoming',
+    content: msg.content,
+    title: msg.title,
+    timestamp: msg.timestamp * 1000,
+    rssi,
+  };
+  await saveMessage(savedMsg);
+
+  if (activeContactHash === savedMsg.contactHash) {
+    await renderMessages(activeContactHash);
+  }
+}
+
+// ---- Link handling ---------------------------------------------------
+
+async function handleLinkRequest(pkt) {
+  const sizeOk = pkt.payload.length === 64 || pkt.payload.length === 67;
+  if (!sizeOk) {
+    log('err', `  LINKREQUEST addressed to us but payload size ${pkt.payload.length} is not 64 or 67, dropping`);
+    return;
+  }
+
+  try {
+    const { link, proofData } = await Link.validateRequest(pkt, myIdentity);
+    const linkIdHex = toHex(link.linkId);
+
+    // If we've already accepted this exact request, just resend the
+    // cached LRPROOF. Regenerating the ephemeral key would orphan the
+    // initiator's existing session state.
+    const existing = links.get(linkIdHex);
+    const linkToStore = existing || link;
+    if (!existing) links.set(linkIdHex, link);
+
+    const proofPacket = buildPacket({
+      headerType: HEADER_1,
+      destType:   DEST_LINK,
+      packetType: PACKET_PROOF,
+      destHash:   linkToStore.linkId,
+      context:    CTX_LRPROOF,
+      payload:    linkToStore.cachedProofData,
+    });
+    await rnode.sendPacket(proofPacket);
+
+    log('ok', `  LINKREQUEST accepted, LRPROOF sent (link ${linkIdHex.substring(0,12)}...)`);
+  } catch (e) {
+    log('err', `  LINKREQUEST validation failed: ${e.message}`);
+  }
+}
+
+async function handleLinkData(pkt, rssi) {
+  const linkIdHex = toHex(pkt.destHash);
+  const link = links.get(linkIdHex);
+  if (!link) {
+    log('info', `  DATA for unknown link ${linkIdHex.substring(0,16)}..., ignoring`);
+    return;
+  }
+
+  try {
+    switch (pkt.context) {
+      case CTX_NONE: {
+        // Full LXMF container encrypted with the link session key.
+        const plaintext = await link.decrypt(pkt.payload);
+        const msg = await unpackLinkMessage(plaintext);
+        log('ok', `  Link ${linkIdHex.substring(0,12)}... delivered LXMF message`);
+        await dispatchIncomingMessage(msg, rssi);
+        break;
+      }
+      case CTX_LRRTT: {
+        // Decrypting it is how we confirm the initiator successfully
+        // verified our LRPROOF; the RTT value itself is not useful here.
+        await link.decrypt(pkt.payload);
+        link.status = LINK_ACTIVE;
+        link.establishedAt = Date.now();
+        log('ok', `  Link ${linkIdHex.substring(0,12)}... ACTIVE (RTT ack received)`);
+        break;
+      }
+      case CTX_LINKCLOSE: {
+        const plaintext = await link.decrypt(pkt.payload);
+        if (plaintext.length === link.linkId.length &&
+            arraysEqual(plaintext, link.linkId)) {
+          link.status = LINK_CLOSED;
+          links.delete(linkIdHex);
+          log('info', `  Link ${linkIdHex.substring(0,12)}... closed by peer`);
+        } else {
+          log('err', `  LINKCLOSE payload did not match link_id, ignoring`);
+        }
+        break;
+      }
+      case CTX_KEEPALIVE: {
+        // Responder has no action to take on keepalives from the
+        // initiator during a short delivery session.
+        break;
+      }
+      default: {
+        log('info', `  Link packet context 0x${pkt.context.toString(16)} not handled`);
+      }
+    }
+  } catch (e) {
+    log('err', `  Link packet handling failed (ctx=0x${pkt.context.toString(16)}): ${e.message}`);
   }
 }
 

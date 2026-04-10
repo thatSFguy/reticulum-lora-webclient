@@ -69,6 +69,23 @@ export async function unpackMessage(data, destHash) {
   };
 }
 
+// Unpack an LXMF message received over an established Link.
+//
+// Unlike opportunistic delivery (which strips the destination hash because
+// it is inferred from the RNS packet header), link-delivered LXMF includes
+// the full container:
+//   destination_hash(16) + source_hash(16) + signature(64) + msgpack(payload)
+// The leading destination hash comes from inside the link ciphertext, not
+// from the outer packet header (which carries the link_id instead).
+export async function unpackLinkMessage(data) {
+  if (data.length < 2 * TRUNCATED_HASHLENGTH + SIGNATURE_LENGTH + 1) {
+    throw new Error('LXMF link message too short');
+  }
+  const destHash = data.subarray(0, TRUNCATED_HASHLENGTH);
+  const inner = data.subarray(TRUNCATED_HASHLENGTH);
+  return unpackMessage(inner, destHash);
+}
+
 // Verify LXMF message signature using the sender's public key
 export function verifyMessageSignature(message, senderIdentity) {
   const signedData = concatBytes([message.hashedPart, message.messageHash]);

@@ -11,7 +11,7 @@ import { concatBytes } from './announce.js';
 
 // ---- HKDF (HMAC-SHA256) using Web Crypto API -------------------------
 
-async function hkdfDerive(ikm, salt, info, length) {
+export async function hkdfDerive(ikm, salt, info, length) {
   const keyMaterial = await crypto.subtle.importKey(
     'raw', ikm, 'HKDF', false, ['deriveBits']
   );
@@ -32,7 +32,7 @@ async function hkdfDerive(ikm, salt, info, length) {
 // plaintext. Reticulum's on-wire format is exactly what Web Crypto
 // produces: iv + raw AES-CBC(PKCS#7(plaintext)) + hmac.
 
-async function tokenEncrypt(derivedKey, plaintext) {
+export async function tokenEncrypt(derivedKey, plaintext) {
   const signingKey    = derivedKey.subarray(0, 32);
   const encryptionKey = derivedKey.subarray(32, 64);
 
@@ -51,7 +51,7 @@ async function tokenEncrypt(derivedKey, plaintext) {
   return concatBytes([iv, ciphertext, hmac]);
 }
 
-async function tokenDecrypt(derivedKey, token) {
+export async function tokenDecrypt(derivedKey, token) {
   if (token.length < 48) throw new Error('Token too short');
 
   const signingKey    = derivedKey.subarray(0, 32);
