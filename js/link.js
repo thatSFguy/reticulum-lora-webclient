@@ -71,6 +71,26 @@ export async function computeLinkId(pkt) {
   return digest.subarray(0, 16);
 }
 
+// Compute the full-size (32 byte) SHA-256 packet hash over a received
+// packet's hashable_part. Upstream Packet::get_hash() uses the full
+// hash (not the truncated one used for link_id) so that RNS packet
+// receipts address the exact packet they acknowledge. The hashable
+// part is (flags & 0x0F) followed by raw[2:] for HEADER_1 or raw[18:]
+// for HEADER_2; unlike computeLinkId, no signalling-byte stripping
+// applies because this is called for generic data packets, not for
+// the LINKREQUEST special case.
+export async function computePacketFullHash(pkt) {
+  const flagsLow = pkt.flags & 0x0F;
+  const skipBytes = pkt.headerType === HEADER_1 ? 2 : 2 + TRUNCATED_HASHLENGTH;
+  const tail = pkt.raw.subarray(skipBytes);
+
+  const hp = new Uint8Array(1 + tail.length);
+  hp[0] = flagsLow;
+  hp.set(tail, 1);
+
+  return sha256(hp);   // full 32-byte SHA-256
+}
+
 export class Link {
   constructor() {
     this.linkId           = null;            // Uint8Array(16)

@@ -10,7 +10,8 @@ import { parsePacket, buildPacket, PACKET_ANNOUNCE, PACKET_DATA, PACKET_LINKREQ,
 import { parseAnnounce, validateAnnounce, buildAnnounce, extractDisplayName, concatBytes, arraysEqual } from './announce.js';
 import { encrypt, decrypt } from './crypto.js';
 import { unpackMessage, unpackLinkMessage, verifyMessageSignature, packMessage } from './lxmf.js';
-import { Link, LINK_ACTIVE, LINK_CLOSED } from './link.js';
+import { Link, LINK_ACTIVE, LINK_CLOSED, computePacketFullHash } from './link.js';
+import { ed25519 } from '@noble/curves/ed25519';
 
 // Reticulum packet context values relevant to link traffic
 const CTX_NONE      = 0x00;
@@ -396,6 +397,34 @@ async function handleLinkData(pkt, rssi) {
         const msg = await unpackLinkMessage(plaintext);
         log('ok', `  Link ${linkIdHex.substring(0,12)}... delivered LXMF message`);
         await dispatchIncomingMessage(msg, rssi);
+        // Send a link packet proof back so the sender's delivery
+        // receipt timeout fires with success and it does not retry
+        // the same message on a fresh link. Upstream's Link.receive
+        // does this automatically via Packet.prove() whenever an
+        // application-level data packet arrives on an established
+        // link. The proof carries the full 32-byte SHA-256 of the
+        // received packet's hashable_part plus an Ed25519 signature
+        // over that hash, signed with our long-term identity key so
+        // the initiator verifies it against the sig_pub it already
+        // knows from our announce and LRPROOF.
+        try {
+          const packetHash = await computePacketFullHash(pkt);
+          const signature  = ed25519.sign(packetHash, myIdentity.sigPrivKey);
+          const proofData  = new Uint8Array(packetHash.length + signature.length);
+          proofData.set(packetHash, 0);
+          proofData.set(signature, packetHash.length);
+          const proofPacket = buildPacket({
+            headerType: HEADER_1,
+            destType:   DEST_LINK,
+            packetType: PACKET_PROOF,
+            destHash:   link.linkId,
+            context:    CTX_NONE,
+            payload:    proofData,
+          });
+          await rnode.sendPacket(proofPacket);
+        } catch (e) {
+          log('info', `  Packet receipt send failed: ${e.message}`);
+        }
         break;
       }
       case CTX_LRRTT: {
