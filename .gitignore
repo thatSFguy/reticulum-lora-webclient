@@ -1,0 +1,15 @@
+# Exported identity files contain private keys — never commit.
+reticulum-identity-*.json
+
+# Editor / OS droppings
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
