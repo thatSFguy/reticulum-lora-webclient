@@ -28,23 +28,31 @@ function hexToBytes(hex) {
   return out;
 }
 
+// Sanity floor for "this is a real wall-clock timestamp": 2020-01-01
+// UTC. Anything older almost certainly comes from a sender whose
+// time.time() is seconds-since-boot because the device has no RTC.
+const SANITY_TS_MIN_MS = Date.UTC(2020, 0, 1);
+
 // Normalize an LXMF timestamp field to Unix ms. Upstream LXMF writes
 // time.time() which is float seconds since epoch, but some encoders
 // produce msgpack Timestamp extensions (which @msgpack/msgpack decodes
 // to a JS Date) and some write integer milliseconds directly. Handle
-// all three, and fall back to the local clock if the value is absent
-// or nonsensical.
+// all three. Returns null if the value is absent or resolves to a
+// pre-2020 wall-clock date, so callers can substitute receive time
+// or hide the label.
 function normalizeLxmfTimestamp(ts) {
-  if (ts == null) return Date.now();
-  if (ts instanceof Date) return ts.getTime();
+  if (ts == null) return null;
+  if (ts instanceof Date) {
+    const ms = ts.getTime();
+    return ms >= SANITY_TS_MIN_MS ? ms : null;
+  }
   if (typeof ts === 'bigint') ts = Number(ts);
-  if (typeof ts !== 'number' || !isFinite(ts)) return Date.now();
+  if (typeof ts !== 'number' || !isFinite(ts)) return null;
   // Values above ~1e12 are already in milliseconds; below that they
-  // are in seconds. Any plausible recent timestamp in seconds is in
-  // the 1.5e9–3e9 range; any plausible timestamp in ms is in the
-  // 1.5e12–3e12 range. The gap is wide enough for this heuristic to
-  // be unambiguous.
-  return ts > 1e12 ? ts : ts * 1000;
+  // are in seconds. The gap between plausible seconds (1.5e9–3e9)
+  // and plausible ms (1.5e12–3e12) is wide enough to be unambiguous.
+  const ms = ts > 1e12 ? ts : ts * 1000;
+  return ms >= SANITY_TS_MIN_MS ? ms : null;
 }
 
 // Logging — declared early so error handlers can use it
@@ -285,12 +293,18 @@ async function dispatchIncomingMessage(msg, rssi) {
 
   log('ok', `  Message from "${senderName}": ${msg.content}`);
 
+  // Fall back to receive time when the sender's clock is bogus so
+  // newly-saved rows render in a meaningful place in the timeline
+  // instead of showing up as "Jan 1, 1970". Clockless Reticulum
+  // nodes (no RTC) send seconds-since-boot as their LXMF timestamp.
+  const senderTs = normalizeLxmfTimestamp(msg.timestamp);
   const savedMsg = {
     contactHash: contactHash || sourceHashHex,
     direction: 'incoming',
     content: msg.content,
     title: msg.title,
-    timestamp: normalizeLxmfTimestamp(msg.timestamp),
+    timestamp: senderTs != null ? senderTs : Date.now(),
+    senderTimeMissing: senderTs == null,
     rssi,
   };
   await saveMessage(savedMsg);
@@ -571,15 +585,20 @@ async function renderMessages(contactHash) {
     return;
   }
 
-  // Normalize timestamps on read so historical rows that were saved
-  // before the normalizer was in place still render as valid dates.
-  const normalized = msgs.map(m => ({ ...m, timestamp: normalizeLxmfTimestamp(m.timestamp) }));
+  // Sort by the IndexedDB auto-increment id, which is strictly the
+  // order the rows were saved. Using the stored timestamp would put
+  // any historical messages that were saved before the bogus-sender-
+  // clock fix at the top of the list, because those rows hold
+  // seconds-since-boot values from clockless LoRa senders that
+  // resolve to Jan 1, 1970.
+  const ordered = msgs.slice().sort((a, b) => (a.id || 0) - (b.id || 0));
 
   list.innerHTML = '';
-  for (const msg of normalized.sort((a, b) => a.timestamp - b.timestamp)) {
+  for (const msg of ordered) {
     const div = document.createElement('div');
     div.className = `message ${msg.direction}`;
-    const time = formatMessageTime(msg.timestamp);
+    const ts = normalizeLxmfTimestamp(msg.timestamp);
+    const time = ts != null ? formatMessageTime(ts) : '(no time)';
     div.innerHTML = `<div>${escapeHtml(msg.content)}</div><div class="meta">${time}</div>`;
     list.appendChild(div);
   }
