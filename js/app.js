@@ -28,6 +28,25 @@ function hexToBytes(hex) {
   return out;
 }
 
+// Normalize an LXMF timestamp field to Unix ms. Upstream LXMF writes
+// time.time() which is float seconds since epoch, but some encoders
+// produce msgpack Timestamp extensions (which @msgpack/msgpack decodes
+// to a JS Date) and some write integer milliseconds directly. Handle
+// all three, and fall back to the local clock if the value is absent
+// or nonsensical.
+function normalizeLxmfTimestamp(ts) {
+  if (ts == null) return Date.now();
+  if (ts instanceof Date) return ts.getTime();
+  if (typeof ts === 'bigint') ts = Number(ts);
+  if (typeof ts !== 'number' || !isFinite(ts)) return Date.now();
+  // Values above ~1e12 are already in milliseconds; below that they
+  // are in seconds. Any plausible recent timestamp in seconds is in
+  // the 1.5e9–3e9 range; any plausible timestamp in ms is in the
+  // 1.5e12–3e12 range. The gap is wide enough for this heuristic to
+  // be unambiguous.
+  return ts > 1e12 ? ts : ts * 1000;
+}
+
 // Logging — declared early so error handlers can use it
 function log(cls, msg) {
   const el = $('log');
@@ -233,7 +252,7 @@ async function dispatchIncomingMessage(msg, rssi) {
     direction: 'incoming',
     content: msg.content,
     title: msg.title,
-    timestamp: msg.timestamp * 1000,
+    timestamp: normalizeLxmfTimestamp(msg.timestamp),
     rssi,
   };
   await saveMessage(savedMsg);
@@ -253,6 +272,12 @@ async function handleLinkRequest(pkt) {
   }
 
   try {
+    // Trace the inbound request for byte-level debugging of the link_id
+    // derivation. First line shows flags/hops and the packet header;
+    // second line shows the 64 or 67 bytes of LINKREQUEST data.
+    log('info', `  LR header type=${pkt.headerType === HEADER_1 ? 'H1' : 'H2'} flags=0x${pkt.flags.toString(16).padStart(2,'0')} hops=${pkt.hops}`);
+    log('info', `  LR data(${pkt.payload.length})=${toHex(pkt.payload)}`);
+
     const { link, proofData } = await Link.validateRequest(pkt, myIdentity);
     const linkIdHex = toHex(link.linkId);
 
@@ -271,6 +296,8 @@ async function handleLinkRequest(pkt) {
       context:    CTX_LRPROOF,
       payload:    linkToStore.cachedProofData,
     });
+
+    log('info', `  LRPROOF tx(${proofPacket.length})=${toHex(proofPacket)}`);
     await rnode.sendPacket(proofPacket);
 
     log('ok', `  LINKREQUEST accepted, LRPROOF sent (link ${linkIdHex.substring(0,12)}...)`);
@@ -489,15 +516,37 @@ async function renderMessages(contactHash) {
     return;
   }
 
+  // Normalize timestamps on read so historical rows that were saved
+  // before the normalizer was in place still render as valid dates.
+  const normalized = msgs.map(m => ({ ...m, timestamp: normalizeLxmfTimestamp(m.timestamp) }));
+
   list.innerHTML = '';
-  for (const msg of msgs.sort((a, b) => a.timestamp - b.timestamp)) {
+  for (const msg of normalized.sort((a, b) => a.timestamp - b.timestamp)) {
     const div = document.createElement('div');
     div.className = `message ${msg.direction}`;
-    const time = new Date(msg.timestamp).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' });
+    const time = formatMessageTime(msg.timestamp);
     div.innerHTML = `<div>${escapeHtml(msg.content)}</div><div class="meta">${time}</div>`;
     list.appendChild(div);
   }
   list.scrollTop = list.scrollHeight;
+}
+
+// Format a message timestamp. Shows "HH:MM" for messages from today,
+// "MMM D, HH:MM" for older messages in the current year, and the full
+// date for anything older than that. 24-hour time throughout so the
+// earlier AM/PM confusion can't recur.
+function formatMessageTime(ms) {
+  const d = new Date(ms);
+  const now = new Date();
+  const sameDay = d.getFullYear() === now.getFullYear() &&
+                  d.getMonth() === now.getMonth() &&
+                  d.getDate() === now.getDate();
+  const hhmm = d.toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit' });
+  if (sameDay) return hhmm;
+  if (d.getFullYear() === now.getFullYear()) {
+    return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) + ' ' + hhmm;
+  }
+  return d.toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' }) + ' ' + hhmm;
 }
 
 function escapeHtml(str) {
