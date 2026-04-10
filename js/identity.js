@@ -83,17 +83,18 @@ export class Identity {
 
 // Compute the destination hash for a SINGLE destination owned by `identityHash`.
 //
-// Reticulum's Destination constructor for SINGLE destinations adds the
-// identity's hex hash as an aspect, so the destination name is
-// "<app>.<aspect>.<hexhash>" — e.g. "lxmf.delivery.a1b2c3..."
+// Matches upstream Reticulum's Destination.hash(identity, app_name, *aspects):
+//   name_hash = SHA256(expand_name(None, app_name, *aspects))[:10]
+//   dest_hash = SHA256(name_hash + identity.hash)[:16]
 //
-// fullName: e.g. "lxmf.delivery" (app + aspects, no hexhash)
+// Note: expand_name is called with identity=None, so the identity's hexhash
+// is NOT part of the string fed to the name hash. The hexhash only appears
+// in the human-readable Destination.name, never in on-wire hashes.
+//
+// fullName: e.g. "lxmf.delivery"
 export async function computeDestinationHash(fullName, identityHash) {
-  const hexhash = bytesToHex(identityHash);
-  const name = fullName + '.' + hexhash;
-
   const nameHash = await truncatedHash(
-    new TextEncoder().encode(name),
+    new TextEncoder().encode(fullName),
     NAME_HASH_LENGTH
   );
   const material = new Uint8Array(NAME_HASH_LENGTH + TRUNCATED_HASHLENGTH);
@@ -102,14 +103,11 @@ export async function computeDestinationHash(fullName, identityHash) {
   return truncatedHash(material);
 }
 
-// Compute the name_hash field used in announces.
-// This includes the hexhash because Reticulum builds it that way.
-export async function computeNameHash(fullName, identityHash) {
-  const hexhash = bytesToHex(identityHash);
-  const name = fullName + '.' + hexhash;
-  return truncatedHash(new TextEncoder().encode(name), NAME_HASH_LENGTH);
-}
-
-function bytesToHex(bytes) {
-  return Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('');
+// Compute the name_hash field used in announces. Same rule as above:
+// identity hexhash is NOT part of the hashed string.
+export async function computeNameHash(fullName) {
+  return truncatedHash(
+    new TextEncoder().encode(fullName),
+    NAME_HASH_LENGTH
+  );
 }

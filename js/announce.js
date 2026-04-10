@@ -68,7 +68,7 @@ export function validateAnnounce(announce, destHashFromHeader) {
 
 // Build an announce for our identity
 export async function buildAnnounce(identity, appName = 'lxmf.delivery', appData = new Uint8Array(0)) {
-  const nameHash = await computeNameHash(appName, identity.hash);
+  const nameHash = await computeNameHash(appName);
   const destHash = await computeDestinationHash(appName, identity.hash);
 
   // Random hash (10 bytes)
