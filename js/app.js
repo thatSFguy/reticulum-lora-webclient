@@ -97,6 +97,17 @@ async function onPacket(data, rssi, snr) {
     await handleAnnounce(pkt, rssi);
   } else if (pkt.packetType === PACKET_DATA) {
     await handleData(pkt, rssi);
+  } else if (pkt.packetType === 2 /* LINKREQ */) {
+    // Sideband is trying to establish a Link instead of opportunistic delivery.
+    // We don't support links yet — log it so user knows.
+    const dh = toHex(pkt.destHash);
+    if (myDestHash && arraysEqual(pkt.destHash, myDestHash)) {
+      log('err', `  LINKREQUEST addressed to us — link establishment not supported (use opportunistic delivery)`);
+    } else {
+      log('info', `  LINKREQUEST dest=${dh.substring(0,16)}... (not for us)`);
+    }
+  } else if (pkt.packetType === 3 /* PROOF */) {
+    // Proof packets are responses to LINKREQUEST or RESOURCE etc.
   }
 }
 
@@ -113,6 +124,12 @@ async function handleAnnounce(pkt, rssi) {
 
   const idHash = toHex(announce.identityHash);
   const displayName = extractDisplayName(announce.appData) || idHash.substring(0, 8);
+
+  // Skip our own announce (rebroadcast by relay/repeater)
+  if (myIdentity && idHash === toHex(myIdentity.hash)) {
+    log('info', '  (own announce, ignoring)');
+    return;
+  }
 
   // Validate signature
   const valid = validateAnnounce(announce, pkt.destHash);
@@ -142,10 +159,16 @@ async function handleAnnounce(pkt, rssi) {
 // ---- Data packet handling (incoming messages) -------------------------
 
 async function handleData(pkt, rssi) {
-  // Check if this packet is addressed to us
-  if (!myDestHash || !arraysEqual(pkt.destHash, myDestHash)) {
-    return;  // Not for us
-  }
+  // Always log incoming DATA dest hash so we can see what's arriving
+  const incomingHex = toHex(pkt.destHash);
+  const ourHex = myDestHash ? toHex(myDestHash) : '(none)';
+  const matches = myDestHash && arraysEqual(pkt.destHash, myDestHash);
+
+  log(matches ? 'ok' : 'info',
+    `  DATA dest=${incomingHex.substring(0,16)}...  (ours=${ourHex.substring(0,16)}...)  ${matches ? 'MATCH' : 'no match'}`
+  );
+
+  if (!matches) return;
 
   log('info', '  Packet addressed to us — attempting decrypt...');
 
