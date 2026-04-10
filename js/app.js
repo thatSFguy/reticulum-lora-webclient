@@ -281,12 +281,19 @@ async function dispatchIncomingMessage(msg, rssi) {
   let senderName = sourceHashHex.substring(0, 8);
   let contactHash = null;
 
+  // Diagnostic view of the payload the verifier is about to check.
+  log('info', `  LXMF payload: elements=${msg.payloadElementCount} raw_msgpack=${msg.msgpackData.length}B stripped=${msg.msgpackForHash.length}B destHashInBody=${toHex(msg.destHash).substring(0, 16)}...`);
+
   for (const [hash, c] of contacts) {
     if (c.identityHash === sourceHashHex || hash === sourceHashHex) {
       senderName = c.displayName;
       contactHash = hash;
-      const valid = verifyMessageSignature(msg, c.identity);
-      log(valid ? 'ok' : 'err', `  Signature: ${valid ? 'valid' : 'INVALID'}`);
+      const result = verifyMessageSignature(msg, c.identity);
+      if (result.ok) {
+        log('ok', `  Signature: valid (${result.variant})`);
+      } else {
+        log('err', `  Signature: INVALID (both stripped and original failed)`);
+      }
       break;
     }
   }

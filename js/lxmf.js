@@ -46,14 +46,20 @@ export async function unpackMessage(data, destHash) {
   const fields    = payload[3] || {};
   const stamp     = payload.length > 4 ? payload[4] : null;
 
-  // Compute message hash for verification
-  // For stamp handling: rebuild msgpack without stamp for hash
-  const msgpackForHash = stamp !== null
-    ? msgpackEncode([timestamp, payload[1], payload[2], fields])
-    : msgpackData;
-
-  const hashedPart = concatBytes([destHash, sourceHash, msgpackForHash]);
-  const messageHash = await sha256(hashedPart);
+  // Upstream LXMF computes the signature hash over a re-encoded msgpack
+  // containing only the first four elements of the payload (the stamp,
+  // if present, is explicitly excluded). We build two candidate hashes:
+  // one over a re-encoded stamp-stripped payload, and one over the raw
+  // on-wire msgpack bytes as a fallback. verifyMessageSignature will
+  // try both because some upstream builds append the stamp as a
+  // trailing blob AFTER the msgpack instead of as a 5th array element,
+  // and the byte-level re-encode can also drift if our msgpack encoder
+  // chooses a different numeric width than the sender's.
+  const strippedMsgpack = new Uint8Array(msgpackEncode([timestamp, payload[1], payload[2], fields]));
+  const hashedStripped = concatBytes([destHash, sourceHash, strippedMsgpack]);
+  const hashStripped   = await sha256(hashedStripped);
+  const hashedOriginal = concatBytes([destHash, sourceHash, msgpackData]);
+  const hashOriginal   = await sha256(hashedOriginal);
 
   return {
     sourceHash,
@@ -63,9 +69,17 @@ export async function unpackMessage(data, destHash) {
     content,
     fields,
     stamp,
-    messageHash,
-    hashedPart,
-    msgpackForHash,
+    destHash,
+    msgpackData,
+    // Primary hashedPart / messageHash preserve the old field names so
+    // verifyMessageSignature's first-pass call still works.
+    hashedPart: hashedStripped,
+    messageHash: hashStripped,
+    msgpackForHash: strippedMsgpack,
+    // Fallback view for the "no stamp stripping" variant.
+    hashedPartOriginal: hashedOriginal,
+    messageHashOriginal: hashOriginal,
+    payloadElementCount: payload.length,
   };
 }
 
@@ -86,10 +100,23 @@ export async function unpackLinkMessage(data) {
   return unpackMessage(inner, destHash);
 }
 
-// Verify LXMF message signature using the sender's public key
+// Verify LXMF message signature using the sender's public key.
+// Tries the stamp-stripped-and-re-encoded view first (upstream LXMF
+// spec behavior), and if that fails falls back to signing over the
+// raw on-wire msgpack bytes. Returns an object describing which
+// variant matched, or {ok: false} if neither did.
 export function verifyMessageSignature(message, senderIdentity) {
-  const signedData = concatBytes([message.hashedPart, message.messageHash]);
-  return senderIdentity.verify(message.signature, signedData);
+  const strippedSigned = concatBytes([message.hashedPart, message.messageHash]);
+  if (senderIdentity.verify(message.signature, strippedSigned)) {
+    return { ok: true, variant: 'stripped' };
+  }
+  if (message.hashedPartOriginal && message.messageHashOriginal) {
+    const originalSigned = concatBytes([message.hashedPartOriginal, message.messageHashOriginal]);
+    if (senderIdentity.verify(message.signature, originalSigned)) {
+      return { ok: true, variant: 'original' };
+    }
+  }
+  return { ok: false };
 }
 
 // ---- Pack an outbound LXMF message -----------------------------------
