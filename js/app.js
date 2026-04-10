@@ -251,9 +251,11 @@ async function sendMessage() {
   try {
     log('info', `Sending to "${contact.displayName}"...`);
 
-    // Pack LXMF message
+    // Pack LXMF message. LXMF's source_hash field is the sender's
+    // LXMF delivery *destination* hash, not the identity hash —
+    // receivers key their contact table on destination hashes.
     const lxmfPayload = await packMessage(
-      myIdentity, contact.destHash, myIdentity.hash,
+      myIdentity, contact.destHash, myDestHash,
       '', content, {}
     );
 
