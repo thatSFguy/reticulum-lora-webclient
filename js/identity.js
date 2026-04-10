@@ -81,9 +81,19 @@ export class Identity {
   }
 }
 
-export async function computeDestinationHash(appName, identityHash) {
+// Compute the destination hash for a SINGLE destination owned by `identityHash`.
+//
+// Reticulum's Destination constructor for SINGLE destinations adds the
+// identity's hex hash as an aspect, so the destination name is
+// "<app>.<aspect>.<hexhash>" — e.g. "lxmf.delivery.a1b2c3..."
+//
+// fullName: e.g. "lxmf.delivery" (app + aspects, no hexhash)
+export async function computeDestinationHash(fullName, identityHash) {
+  const hexhash = bytesToHex(identityHash);
+  const name = fullName + '.' + hexhash;
+
   const nameHash = await truncatedHash(
-    new TextEncoder().encode(appName),
+    new TextEncoder().encode(name),
     NAME_HASH_LENGTH
   );
   const material = new Uint8Array(NAME_HASH_LENGTH + TRUNCATED_HASHLENGTH);
@@ -92,9 +102,14 @@ export async function computeDestinationHash(appName, identityHash) {
   return truncatedHash(material);
 }
 
-export async function computeNameHash(appName) {
-  return truncatedHash(
-    new TextEncoder().encode(appName),
-    NAME_HASH_LENGTH
-  );
+// Compute the name_hash field used in announces.
+// This includes the hexhash because Reticulum builds it that way.
+export async function computeNameHash(fullName, identityHash) {
+  const hexhash = bytesToHex(identityHash);
+  const name = fullName + '.' + hexhash;
+  return truncatedHash(new TextEncoder().encode(name), NAME_HASH_LENGTH);
+}
+
+function bytesToHex(bytes) {
+  return Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('');
 }

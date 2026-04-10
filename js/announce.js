@@ -37,22 +37,13 @@ export async function parseAnnounce(payload, contextFlag, destHashFromHeader) {
   // Compute identity hash from public key
   const identityHash = await truncatedHash(publicKey);
 
-  // Compute expected destination hash
-  // We need the app name — for LXMF it's "lxmf.delivery"
-  // We can verify by checking nameHash matches
-  const lxmfNameHash = await computeNameHash('lxmf.delivery');
-  let appName = null;
-  if (arraysEqual(nameHash, lxmfNameHash)) {
-    appName = 'lxmf.delivery';
-  }
-
-  const destHash = appName
-    ? await computeDestinationHash(appName, identityHash)
-    : null;
+  // For LXMF announces, the dest hash in the header is the authoritative
+  // value. We use it directly rather than recomputing.
+  const destHash = destHashFromHeader;
 
   return {
     publicKey, nameHash, randomHash, ratchet, signature, appData,
-    identityHash, destHash, appName,
+    identityHash, destHash, appName: 'lxmf.delivery',
   };
 }
 
@@ -77,7 +68,7 @@ export function validateAnnounce(announce, destHashFromHeader) {
 
 // Build an announce for our identity
 export async function buildAnnounce(identity, appName = 'lxmf.delivery', appData = new Uint8Array(0)) {
-  const nameHash = await computeNameHash(appName);
+  const nameHash = await computeNameHash(appName, identity.hash);
   const destHash = await computeDestinationHash(appName, identity.hash);
 
   // Random hash (10 bytes)
