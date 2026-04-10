@@ -273,9 +273,10 @@ async function handleLinkRequest(pkt) {
 
   try {
     // Trace the inbound request for byte-level debugging of the link_id
-    // derivation. First line shows flags/hops and the packet header;
-    // second line shows the 64 or 67 bytes of LINKREQUEST data.
-    log('info', `  LR header type=${pkt.headerType === HEADER_1 ? 'H1' : 'H2'} flags=0x${pkt.flags.toString(16).padStart(2,'0')} hops=${pkt.hops}`);
+    // derivation. First line shows the full header state (type, flags,
+    // hops, and the context byte). Second line shows the 64 or 67 bytes
+    // of LINKREQUEST data.
+    log('info', `  LR header type=${pkt.headerType === HEADER_1 ? 'H1' : 'H2'} flags=0x${pkt.flags.toString(16).padStart(2,'0')} hops=${pkt.hops} ctx=0x${pkt.context.toString(16).padStart(2,'0')}`);
     log('info', `  LR data(${pkt.payload.length})=${toHex(pkt.payload)}`);
 
     const { link, proofData } = await Link.validateRequest(pkt, myIdentity);
@@ -297,7 +298,24 @@ async function handleLinkRequest(pkt) {
       payload:    linkToStore.cachedProofData,
     });
 
+    // Dump everything needed to independently recompute the signature
+    // and confirm the math is self-consistent without having to repro
+    // on a second device.
+    log('info', `  LR sigpub=${toHex(linkToStore.ourSigPub)}`);
+    log('info', `  LR signed(${linkToStore.signedData.length})=${toHex(linkToStore.signedData)}`);
     log('info', `  LRPROOF tx(${proofPacket.length})=${toHex(proofPacket)}`);
+
+    // Refresh our announce before the proof goes out, so whatever
+    // transport node is sitting between us and the initiator cannot
+    // be serving a stale identity for our destination when the
+    // initiator reconstructs signed_data to verify our signature.
+    // Cheap insurance against path-table rot.
+    try {
+      await sendAnnounce();
+    } catch (e) {
+      log('info', `  (pre-LRPROOF announce failed: ${e.message})`);
+    }
+
     await rnode.sendPacket(proofPacket);
 
     log('ok', `  LINKREQUEST accepted, LRPROOF sent (link ${linkIdHex.substring(0,12)}...)`);

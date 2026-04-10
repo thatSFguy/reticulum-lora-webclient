@@ -165,6 +165,8 @@ export class Link {
     const signature = ed25519.sign(signedData, link.ourSigPriv);
     const proofData = concatBytes([signature, link.ourX25519Pub, link.signallingBytes]);
     link.cachedProofData = proofData;
+    link.signedData      = signedData;
+    link.signatureBytes  = signature;
 
     return { link, proofData };
   }
