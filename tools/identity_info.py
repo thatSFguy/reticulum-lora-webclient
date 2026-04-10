@@ -54,6 +54,7 @@ def main():
 
     enc_priv_bytes = bytes_from_array(data["encPrivKey"])
     sig_priv_bytes = bytes_from_array(data["sigPrivKey"])
+    ratchet_priv_bytes = bytes_from_array(data["ratchetPrivKey"]) if "ratchetPrivKey" in data else None
 
     # Load through RNS to match exactly how the client derives its pub halves.
     # RNS's X25519PrivateKey.from_private_bytes / public_key does the clamping
@@ -65,18 +66,28 @@ def main():
     sig_priv = Ed25519PrivateKey.from_private_bytes(sig_priv_bytes)
     sig_pub_bytes = sig_priv.public_key().public_bytes()
 
+    ratchet_pub_bytes = None
+    if ratchet_priv_bytes:
+        ratchet_priv = X25519PrivateKey.from_private_bytes(ratchet_priv_bytes)
+        ratchet_pub_bytes = ratchet_priv.public_key().public_bytes()
+
     public_key = enc_pub_bytes + sig_pub_bytes     # 64 bytes
     identity_hash = sha256(public_key)[:TRUNCATED_HASHLENGTH]
 
     lxmf_dest_hash = destination_hash("lxmf.delivery", identity_hash)
 
-    print("encPrivKey  (32) =", enc_priv_bytes.hex())
-    print("encPubKey   (32) =", enc_pub_bytes.hex())
-    print("sigPrivKey  (32) =", sig_priv_bytes.hex())
-    print("sigPubKey   (32) =", sig_pub_bytes.hex())
-    print("publicKey   (64) =", public_key.hex())
-    print("identityHash(16) =", identity_hash.hex())
-    print("lxmfDestHash(16) =", lxmf_dest_hash.hex())
+    print("encPrivKey    (32) =", enc_priv_bytes.hex())
+    print("encPubKey     (32) =", enc_pub_bytes.hex())
+    print("sigPrivKey    (32) =", sig_priv_bytes.hex())
+    print("sigPubKey     (32) =", sig_pub_bytes.hex())
+    if ratchet_priv_bytes:
+        print("ratchetPrivKey(32) =", ratchet_priv_bytes.hex())
+        print("ratchetPubKey (32) =", ratchet_pub_bytes.hex())
+    else:
+        print("ratchetPrivKey     = (not present; pre-ratchet identity export)")
+    print("publicKey     (64) =", public_key.hex())
+    print("identityHash  (16) =", identity_hash.hex())
+    print("lxmfDestHash  (16) =", lxmf_dest_hash.hex())
 
 
 if __name__ == "__main__":

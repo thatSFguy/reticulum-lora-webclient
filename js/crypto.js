@@ -92,20 +92,28 @@ export async function encrypt(plaintext, recipientEncPubKey, recipientIdentityHa
   return concatBytes([ephPub, token]);
 }
 
-// Decrypt ciphertext using our X25519 private key.
+// Decrypt ciphertext using one of several candidate X25519 private
+// keys. Callers pass the keys in try-order: typically the current
+// ratchet private key first, then the long-term identity private
+// key as a fallback for senders who don't track our ratchet.
 // ciphertext = ephemeral_pubkey(32) + token
-export async function decrypt(ciphertext, ourEncPrivKey, ourIdentityHash) {
+export async function decrypt(ciphertext, ourEncPrivKeys, ourIdentityHash) {
   if (ciphertext.length < 32 + 48) throw new Error('Ciphertext too short');
 
   const ephPub = ciphertext.subarray(0, 32);
   const token  = ciphertext.subarray(32);
 
-  // ECDH shared secret
-  const shared = x25519.getSharedSecret(ourEncPrivKey, ephPub);
-
-  // HKDF derive 64 bytes
-  const derived = await hkdfDerive(shared, ourIdentityHash, new Uint8Array(0), 64);
-
-  // Token decrypt
-  return tokenDecrypt(derived, token);
+  const candidates = Array.isArray(ourEncPrivKeys) ? ourEncPrivKeys : [ourEncPrivKeys];
+  let lastError = null;
+  for (const priv of candidates) {
+    if (!priv) continue;
+    try {
+      const shared = x25519.getSharedSecret(priv, ephPub);
+      const derived = await hkdfDerive(shared, ourIdentityHash, new Uint8Array(0), 64);
+      return await tokenDecrypt(derived, token);
+    } catch (e) {
+      lastError = e;
+    }
+  }
+  throw lastError || new Error('Decryption failed with all candidate keys');
 }

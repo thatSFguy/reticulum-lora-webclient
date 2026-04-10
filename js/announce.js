@@ -66,8 +66,19 @@ export function validateAnnounce(announce, destHashFromHeader) {
   }
 }
 
-// Build an announce for our identity
-export async function buildAnnounce(identity, appName = 'lxmf.delivery', appData = new Uint8Array(0)) {
+// Build an announce for our identity.
+//
+// If `ratchetPub` is supplied, the announce carries the ratchet in
+// the Reticulum 0.7+ layout: the 32-byte ratchet public key is
+// inserted between `random_hash` and `signature` in the on-wire
+// payload, and also included in `signed_data` (in the same
+// position) so the initiator-side signature check matches.
+//
+// Callers that emit a ratchet announce MUST also set the packet
+// header's `contextFlag` bit to 1 so receivers know to parse the
+// extra 32 bytes. The returned `hasRatchet` flag is a convenience
+// for the caller that drives `buildPacket`.
+export async function buildAnnounce(identity, appName = 'lxmf.delivery', appData = new Uint8Array(0), ratchetPub = null) {
   const nameHash = await computeNameHash(appName);
   const destHash = await computeDestinationHash(appName, identity.hash);
 
@@ -75,14 +86,21 @@ export async function buildAnnounce(identity, appName = 'lxmf.delivery', appData
   const randomHash = new Uint8Array(10);
   crypto.getRandomValues(randomHash);
 
-  // Build signed_data = dest_hash + public_key + name_hash + random_hash + app_data
-  const signedData = concatBytes([destHash, identity.publicKey, nameHash, randomHash, appData]);
+  // signed_data = dest_hash + public_key + name_hash + random_hash + [ratchet] + app_data
+  const signedParts = [destHash, identity.publicKey, nameHash, randomHash];
+  if (ratchetPub) signedParts.push(ratchetPub);
+  signedParts.push(appData);
+  const signedData = concatBytes(signedParts);
   const signature = identity.sign(signedData);
 
-  // Announce payload = public_key(64) + name_hash(10) + random_hash(10) + signature(64) + app_data
-  const payload = concatBytes([identity.publicKey, nameHash, randomHash, signature, appData]);
+  // Wire payload = public_key(64) + name_hash(10) + random_hash(10) + [ratchet(32)] + signature(64) + app_data
+  const payloadParts = [identity.publicKey, nameHash, randomHash];
+  if (ratchetPub) payloadParts.push(ratchetPub);
+  payloadParts.push(signature);
+  payloadParts.push(appData);
+  const payload = concatBytes(payloadParts);
 
-  return { destHash, payload };
+  return { destHash, payload, hasRatchet: !!ratchetPub };
 }
 
 // Extract display name from announce app_data.

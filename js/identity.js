@@ -19,12 +19,14 @@ export async function truncatedHash(data, length = TRUNCATED_HASHLENGTH) {
 
 export class Identity {
   constructor() {
-    this.encPrivKey = null;   // X25519 private key (32 bytes)
-    this.encPubKey = null;    // X25519 public key (32 bytes)
-    this.sigPrivKey = null;   // Ed25519 private key (32 bytes)
-    this.sigPubKey = null;    // Ed25519 public key (32 bytes)
-    this.publicKey = null;    // Combined: encPub(32) + sigPub(32) = 64 bytes
-    this.hash = null;         // Identity hash: SHA-256(publicKey)[0:16]
+    this.encPrivKey = null;       // X25519 private key (32 bytes) — long-term identity
+    this.encPubKey = null;        // X25519 public key  (32 bytes)
+    this.sigPrivKey = null;       // Ed25519 private key (32 bytes)
+    this.sigPubKey = null;        // Ed25519 public key  (32 bytes)
+    this.ratchetPrivKey = null;   // X25519 private key (32 bytes) — ratchet
+    this.ratchetPubKey = null;    // X25519 public key  (32 bytes)
+    this.publicKey = null;        // Combined: encPub(32) + sigPub(32) = 64 bytes
+    this.hash = null;             // Identity hash: SHA-256(publicKey)[0:16]
   }
 
   async generate() {
@@ -34,6 +36,11 @@ export class Identity {
     this.sigPrivKey = ed25519.utils.randomPrivateKey();
     this.sigPubKey = ed25519.getPublicKey(this.sigPrivKey);
 
+    // Fresh ratchet keypair — included in every outbound announce so
+    // other nodes encrypt to it instead of the long-term identity key.
+    this.ratchetPrivKey = x25519.utils.randomPrivateKey();
+    this.ratchetPubKey = x25519.getPublicKey(this.ratchetPrivKey);
+
     this.publicKey = new Uint8Array(64);
     this.publicKey.set(this.encPubKey, 0);
     this.publicKey.set(this.sigPubKey, 32);
@@ -41,17 +48,30 @@ export class Identity {
     this.hash = await truncatedHash(this.publicKey);
   }
 
-  async loadFromPrivateKeys(encPriv, sigPriv) {
+  async loadFromPrivateKeys(encPriv, sigPriv, ratchetPriv = null) {
     this.encPrivKey = new Uint8Array(encPriv);
     this.sigPrivKey = new Uint8Array(sigPriv);
     this.encPubKey = x25519.getPublicKey(this.encPrivKey);
     this.sigPubKey = ed25519.getPublicKey(this.sigPrivKey);
+
+    if (ratchetPriv) {
+      this.ratchetPrivKey = new Uint8Array(ratchetPriv);
+      this.ratchetPubKey = x25519.getPublicKey(this.ratchetPrivKey);
+    }
 
     this.publicKey = new Uint8Array(64);
     this.publicKey.set(this.encPubKey, 0);
     this.publicKey.set(this.sigPubKey, 32);
 
     this.hash = await truncatedHash(this.publicKey);
+  }
+
+  // Generate a fresh ratchet keypair without touching the long-term
+  // identity keys. Used by the one-time migration that upgrades an
+  // existing identity on first load under a ratchet-aware client.
+  generateRatchet() {
+    this.ratchetPrivKey = x25519.utils.randomPrivateKey();
+    this.ratchetPubKey = x25519.getPublicKey(this.ratchetPrivKey);
   }
 
   async loadFromPublicKey(pubKey) {
@@ -74,10 +94,14 @@ export class Identity {
   }
 
   exportPrivateKeys() {
-    return {
+    const out = {
       encPrivKey: Array.from(this.encPrivKey),
       sigPrivKey: Array.from(this.sigPrivKey),
     };
+    if (this.ratchetPrivKey) {
+      out.ratchetPrivKey = Array.from(this.ratchetPrivKey);
+    }
+    return out;
   }
 }
 

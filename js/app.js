@@ -120,9 +120,21 @@ async function initIdentity() {
   if (stored && stored.encPrivKey && stored.sigPrivKey) {
     await myIdentity.loadFromPrivateKeys(
       new Uint8Array(stored.encPrivKey),
-      new Uint8Array(stored.sigPrivKey)
+      new Uint8Array(stored.sigPrivKey),
+      stored.ratchetPrivKey ? new Uint8Array(stored.ratchetPrivKey) : null
     );
     log('ok', 'Identity loaded from storage');
+    // One-time migration for identities saved before the ratchet
+    // landed. Generating a ratchet is cheap and only touches the
+    // identity row — it does NOT change encPrivKey, sigPrivKey,
+    // publicKey, identity hash, or destination hash. The ratchet
+    // is an additional keypair that coexists with the identity
+    // X25519 key and is advertised in future announces.
+    if (!myIdentity.ratchetPrivKey) {
+      myIdentity.generateRatchet();
+      await saveIdentity(myIdentity.exportPrivateKeys());
+      log('info', 'Generated ratchet keypair for existing identity');
+    }
   } else {
     await myIdentity.generate();
     await saveIdentity(myIdentity.exportPrivateKeys());
@@ -161,7 +173,11 @@ async function initIdentity() {
     // destHash may be stored as array; fall back to decoding the hex hash field
     // for legacy records saved before destHash was persisted.
     const destHash = c.destHash ? new Uint8Array(c.destHash) : hexToBytes(c.hash);
-    contacts.set(c.hash, { ...c, identity, destHash });
+    // Rehydrate ratchet pub if this contact was learned from a
+    // ratchet-bearing announce. Missing on legacy rows; sendMessage
+    // falls back to the identity X25519 key in that case.
+    const ratchetPub = c.ratchetPub ? new Uint8Array(c.ratchetPub) : null;
+    contacts.set(c.hash, { ...c, identity, destHash, ratchetPub });
   }
   if (purged > 0) {
     log('info', `Removed ${purged} legacy contact${purged === 1 ? '' : 's'} (no verifiable name_hash); valid LXMF peers will return on their next announce`);
@@ -257,6 +273,11 @@ async function handleAnnounce(pkt, rssi) {
     publicKey: Array.from(announce.publicKey),
     destHash: Array.from(destHashBytes),
     nameHash: Array.from(announce.nameHash),
+    // If the announce carried a ratchet (context_flag=1), keep it
+    // on the contact row so sendMessage can encrypt to it instead
+    // of the long-term identity X25519 key. Falls back to the
+    // identity key in sendMessage when this is null.
+    ratchetPub: announce.ratchet ? Array.from(announce.ratchet) : null,
     displayName,
     lastSeen: Date.now(),
     rssi,
@@ -264,7 +285,8 @@ async function handleAnnounce(pkt, rssi) {
 
   const identity = new Identity();
   await identity.loadFromPublicKey(announce.publicKey);
-  contacts.set(destHashHex, { ...contact, identity, destHash: destHashBytes });
+  const ratchetPubBytes = announce.ratchet ? new Uint8Array(announce.ratchet) : null;
+  contacts.set(destHashHex, { ...contact, identity, destHash: destHashBytes, ratchetPub: ratchetPubBytes });
 
   await saveContact(contact);
   renderContactList();
@@ -287,8 +309,12 @@ async function handleData(pkt, rssi) {
   log('info', '  Packet addressed to us — attempting decrypt...');
 
   try {
-    // The packet data (after RNS header) is the encrypted LXMF payload
-    const plaintext = await decrypt(pkt.payload, myIdentity.encPrivKey, myIdentity.hash);
+    // The packet data (after RNS header) is the encrypted LXMF payload.
+    // Try the ratchet private key first (most traffic will be encrypted
+    // to it once we advertise one) and fall back to the long-term
+    // identity X25519 key for senders that haven't seen our ratchet yet.
+    const candidatePrivs = [myIdentity.ratchetPrivKey, myIdentity.encPrivKey].filter(Boolean);
+    const plaintext = await decrypt(pkt.payload, candidatePrivs, myIdentity.hash);
 
     // Unpack LXMF message (opportunistic form: dest hash stripped)
     const msg = await unpackMessage(plaintext, myDestHash);
@@ -506,8 +532,12 @@ async function sendMessage() {
       '', content, {}
     );
 
-    // Encrypt for recipient
-    const encrypted = await encrypt(lxmfPayload, contact.identity.encPubKey, contact.identity.hash);
+    // Encrypt for recipient. Prefer their current ratchet pubkey
+    // (learned from a ratchet-bearing announce) so the recipient's
+    // forward-secrecy story benefits from our side too. Fall back
+    // to the identity X25519 key if no ratchet is known.
+    const recipientPub = contact.ratchetPub || contact.identity.encPubKey;
+    const encrypted = await encrypt(lxmfPayload, recipientPub, contact.identity.hash);
 
     // Build Reticulum packet
     const packet = buildPacket({
@@ -690,10 +720,17 @@ async function sendAnnounce() {
   const nameBytes = new TextEncoder().encode(displayName);
   const appData = new Uint8Array(msgpackEncode([nameBytes, 0]));
 
-  const { destHash, payload } = await buildAnnounce(myIdentity, 'lxmf.delivery', appData);
+  const { destHash, payload, hasRatchet } = await buildAnnounce(
+    myIdentity, 'lxmf.delivery', appData, myIdentity.ratchetPubKey
+  );
 
   const packet = buildPacket({
     headerType: HEADER_1,
+    // The context_flag bit of the header signals to receivers that
+    // the payload contains a 32-byte ratchet pubkey between the
+    // random hash and the signature. Must be 1 iff buildAnnounce
+    // actually inserted a ratchet.
+    contextFlag: hasRatchet ? 1 : 0,
     destType: DEST_SINGLE,
     packetType: PACKET_ANNOUNCE,
     destHash: destHash,
@@ -702,7 +739,7 @@ async function sendAnnounce() {
   });
 
   await rnode.sendPacket(packet);
-  log('ok', `Announce sent as "${displayName}" [${toHex(destHash).substring(0,12)}...]`);
+  log('ok', `Announce sent as "${displayName}" [${toHex(destHash).substring(0,12)}...]${hasRatchet ? ' (ratchet)' : ''}`);
 }
 
 // ---- UI rendering ----------------------------------------------------
