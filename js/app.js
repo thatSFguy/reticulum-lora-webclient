@@ -672,7 +672,18 @@ async function startRadio() {
     radioOn = on;
     $('radio-status').textContent = on ? 'Radio: ON' : '';
     $('radio-status').className = on ? 'status-on' : 'status-off';
-    if (on) log('ok', 'Radio on');
+    if (on) {
+      log('ok', 'Radio on');
+      // Emit one announce as soon as the radio is up so every RNS node
+      // in earshot has our current identity in its path table. Without
+      // this, any relay that validates inbound LRPROOFs by recalling
+      // the responder identity will silently drop our proofs if our
+      // entry isn't in its cache — the exact symptom of incoming link
+      // handshakes stalling even though our LRPROOF bytes verify.
+      // Best-effort only; if the announce fails (radio busy, etc.)
+      // the user can still hit the Announce button manually.
+      sendAnnounce().catch(e => log('info', `Startup announce skipped: ${e.message}`));
+    }
   } catch (e) { log('err', 'Radio: ' + e.message); }
 }
 
