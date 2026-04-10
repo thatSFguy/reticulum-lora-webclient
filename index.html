@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Reticulum Web Client</title>
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+
+<header>
+  <h1>Reticulum Web Client
+    <small>LoRa messaging via RNode over Bluetooth — Phase 1: Packet Sniffer</small>
+  </h1>
+</header>
+
+<div id="unsupported" class="notice err hidden">
+  <strong>Web Bluetooth not supported.</strong>
+  Use Chrome, Edge, or Brave on Android or desktop.
+</div>
+
+<!-- Connect panel -->
+<div class="panel">
+  <h2>Connect to RNode</h2>
+  <p style="margin: 0 0 12px 0; color: var(--muted); font-size: 13px;">
+    Make sure the RNode is powered on and BLE is advertising.
+    Click Connect and select the "RNode XXXX" device from the Bluetooth picker.
+  </p>
+  <div class="row">
+    <span><span class="status-dot" id="conn-dot"></span><span id="conn-text">Disconnected</span></span>
+    <button id="btn-connect">Connect</button>
+    <button id="btn-disconnect" class="secondary hidden">Disconnect</button>
+  </div>
+</div>
+
+<!-- Radio config panel -->
+<div id="config-panel" class="panel hidden">
+  <h2>Radio Configuration</h2>
+  <div class="row">
+    <div class="field"><label>Frequency (Hz)</label>
+      <input id="cfg-freq" type="number" value="904375000"></div>
+    <div class="field narrow"><label>Bandwidth</label>
+      <select id="cfg-bw">
+        <option value="7800">7.8 kHz</option>
+        <option value="10400">10.4 kHz</option>
+        <option value="15600">15.6 kHz</option>
+        <option value="20800">20.8 kHz</option>
+        <option value="31250">31.25 kHz</option>
+        <option value="41700">41.7 kHz</option>
+        <option value="62500">62.5 kHz</option>
+        <option value="125000">125 kHz</option>
+        <option value="250000" selected>250 kHz</option>
+        <option value="500000">500 kHz</option>
+      </select></div>
+    <div class="field narrow"><label>SF</label>
+      <select id="cfg-sf">
+        <option>7</option><option>8</option><option>9</option>
+        <option selected>10</option><option>11</option><option>12</option>
+      </select></div>
+    <div class="field narrow"><label>CR</label>
+      <select id="cfg-cr">
+        <option value="5" selected>4/5</option>
+        <option value="6">4/6</option>
+        <option value="7">4/7</option>
+        <option value="8">4/8</option>
+      </select></div>
+    <div class="field narrow"><label>TX Power</label>
+      <input id="cfg-txp" type="number" min="-9" max="22" value="16"></div>
+  </div>
+  <div class="actions">
+    <button id="btn-start-radio">Start Radio</button>
+    <button id="btn-stop-radio" class="secondary">Stop Radio</button>
+    <span id="radio-status" class="status-off">Radio: OFF</span>
+  </div>
+</div>
+
+<!-- Packet log panel -->
+<div id="packet-panel" class="panel hidden">
+  <h2>Packets</h2>
+  <div class="actions" style="margin-top: 0; margin-bottom: 10px;">
+    <button id="btn-clear-log" class="secondary">Clear</button>
+  </div>
+  <div id="log"></div>
+</div>
+
+<script type="module" src="js/app.js"></script>
+</body>
+</html>
