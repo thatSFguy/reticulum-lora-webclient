@@ -22,29 +22,15 @@ async function hkdfDerive(ikm, salt, info, length) {
   return new Uint8Array(bits);
 }
 
-// ---- PKCS7 padding ---------------------------------------------------
-
-function pkcs7Pad(data, blockSize = 16) {
-  const padLen = blockSize - (data.length % blockSize);
-  const padded = new Uint8Array(data.length + padLen);
-  padded.set(data);
-  padded.fill(padLen, data.length);
-  return padded;
-}
-
-function pkcs7Unpad(data) {
-  if (data.length === 0) throw new Error('PKCS7: empty data');
-  const padLen = data[data.length - 1];
-  if (padLen === 0 || padLen > 16) throw new Error('PKCS7: invalid padding');
-  for (let i = data.length - padLen; i < data.length; i++) {
-    if (data[i] !== padLen) throw new Error('PKCS7: invalid padding bytes');
-  }
-  return data.subarray(0, data.length - padLen);
-}
-
 // ---- Token (modified Fernet) -----------------------------------------
 // Key split: first 32 bytes = signing key (HMAC), last 32 bytes = encryption key (AES-256)
 // Token = iv(16) + aes_ciphertext + hmac(32)
+//
+// Note: Web Crypto's AES-CBC applies PKCS#7 padding automatically on
+// both encrypt and decrypt. We do not (and must not) pad/unpad manually,
+// or we would double-pad outbound ciphertext and double-unpad inbound
+// plaintext. Reticulum's on-wire format is exactly what Web Crypto
+// produces: iv + raw AES-CBC(PKCS#7(plaintext)) + hmac.
 
 async function tokenEncrypt(derivedKey, plaintext) {
   const signingKey    = derivedKey.subarray(0, 32);
@@ -53,14 +39,10 @@ async function tokenEncrypt(derivedKey, plaintext) {
   const iv = new Uint8Array(16);
   crypto.getRandomValues(iv);
 
-  const padded = pkcs7Pad(plaintext);
-
-  // AES-256-CBC encrypt
   const aesKey = await crypto.subtle.importKey('raw', encryptionKey, 'AES-CBC', false, ['encrypt']);
-  const cipherBuf = await crypto.subtle.encrypt({ name: 'AES-CBC', iv }, aesKey, padded);
+  const cipherBuf = await crypto.subtle.encrypt({ name: 'AES-CBC', iv }, aesKey, plaintext);
   const ciphertext = new Uint8Array(cipherBuf);
 
-  // HMAC-SHA256 over iv + ciphertext
   const hmacKey = await crypto.subtle.importKey('raw', signingKey, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
   const hmacData = concatBytes([iv, ciphertext]);
   const hmacBuf = await crypto.subtle.sign('HMAC', hmacKey, hmacData);
@@ -79,18 +61,14 @@ async function tokenDecrypt(derivedKey, token) {
   const ciphertext = token.subarray(16, token.length - 32);
   const hmac       = token.subarray(token.length - 32);
 
-  // Verify HMAC-SHA256
   const hmacKey = await crypto.subtle.importKey('raw', signingKey, { name: 'HMAC', hash: 'SHA-256' }, false, ['verify']);
   const hmacData = concatBytes([iv, ciphertext]);
   const valid = await crypto.subtle.verify('HMAC', hmacKey, hmac, hmacData);
   if (!valid) throw new Error('HMAC verification failed');
 
-  // AES-256-CBC decrypt
   const aesKey = await crypto.subtle.importKey('raw', encryptionKey, 'AES-CBC', false, ['decrypt']);
   const plainBuf = await crypto.subtle.decrypt({ name: 'AES-CBC', iv }, aesKey, ciphertext);
-  const padded = new Uint8Array(plainBuf);
-
-  return pkcs7Unpad(padded);
+  return new Uint8Array(plainBuf);
 }
 
 // ---- Reticulum encrypt/decrypt (ECDH + HKDF + Token) ----------------
