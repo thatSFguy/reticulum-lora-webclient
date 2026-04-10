@@ -78,6 +78,7 @@ let contacts = new Map();  // hash_hex → { hash, publicKey, displayName, destH
 let activeContactHash = null;
 let radioOn = false;
 let links = new Map();     // hex link_id → Link instance (incoming links only)
+let lxmfNameHash = null;   // SHA256("lxmf.delivery")[:10], cached
 
 rnode._onLog = (msg) => log('info', msg);
 
@@ -102,18 +103,36 @@ async function initIdentity() {
   }
 
   myDestHash = await computeDestinationHash('lxmf.delivery', myIdentity.hash);
+  lxmfNameHash = await computeNameHash('lxmf.delivery');
   $('my-address').textContent = toHex(myDestHash);
   log('info', `LXMF address: ${toHex(myDestHash)}`);
 
-  // Load saved contacts
+  // Load saved contacts. Drop legacy records that were saved before
+  // the announce parser learned to filter by name_hash — these are
+  // mostly repeater telemetry beacons (display name starts with
+  // "bat=") and announces from non-LXMF destinations whose name_hash
+  // we now stored on the row but does not match lxmf.delivery.
   const savedContacts = await getAllContacts();
+  const expectedNameHashHex = toHex(lxmfNameHash);
+  let purged = 0;
   for (const c of savedContacts) {
+    const looksLikeTelemetry = typeof c.displayName === 'string' && /^bat=\d+;/.test(c.displayName);
+    const wrongNameHash = c.nameHash && toHex(new Uint8Array(c.nameHash)) !== expectedNameHashHex;
+    if (looksLikeTelemetry || wrongNameHash) {
+      await deleteMessagesForContact(c.hash);
+      await deleteContact(c.hash);
+      purged++;
+      continue;
+    }
     const identity = new Identity();
     await identity.loadFromPublicKey(new Uint8Array(c.publicKey));
     // destHash may be stored as array; fall back to decoding the hex hash field
     // for legacy records saved before destHash was persisted.
     const destHash = c.destHash ? new Uint8Array(c.destHash) : hexToBytes(c.hash);
     contacts.set(c.hash, { ...c, identity, destHash });
+  }
+  if (purged > 0) {
+    log('info', `Removed ${purged} non-LXMF contact${purged === 1 ? '' : 's'} from storage`);
   }
   renderContactList();
 }
@@ -164,6 +183,18 @@ async function handleAnnounce(pkt, rssi) {
   }
 
   const idHash = toHex(announce.identityHash);
+
+  // Filter by name_hash. The 10-byte name_hash field in the announce
+  // identifies which application destination this announce belongs to;
+  // we only want lxmf.delivery announces in our contact list. Repeater
+  // telemetry beacons (rlr.telemetry), heartbeat destinations, and any
+  // other non-LXMF destination produce signed-and-valid announces with
+  // a different name_hash and previously polluted the contact list.
+  if (!arraysEqual(announce.nameHash, lxmfNameHash)) {
+    log('info', `  Non-LXMF announce (name_hash=${toHex(announce.nameHash)}) from ${idHash.substring(0, 12)}..., ignoring`);
+    return;
+  }
+
   const displayName = extractDisplayName(announce.appData) || idHash.substring(0, 8);
 
   // Skip our own announce (rebroadcast by relay/repeater)
@@ -186,6 +217,7 @@ async function handleAnnounce(pkt, rssi) {
     identityHash: idHash,
     publicKey: Array.from(announce.publicKey),
     destHash: Array.from(destHashBytes),
+    nameHash: Array.from(announce.nameHash),
     displayName,
     lastSeen: Date.now(),
     rssi,
