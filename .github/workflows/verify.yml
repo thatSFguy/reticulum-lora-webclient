@@ -1,0 +1,58 @@
+name: verify
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+  # Allow manual triggering from the Actions tab so we can re-run
+  # against a freshly released rns version without pushing a commit.
+  workflow_dispatch:
+
+jobs:
+  verify-lrproof-selftest:
+    name: RNS crypto primitives self-test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install rns umsgpack
+
+      - name: Run verify_lrproof.py phase-1 self test
+        run: python tools/verify_lrproof.py
+
+      - name: Run rns_responder.py smoke test
+        # Exercise the RNS link responder path end-to-end with a
+        # synthesized LINKREQUEST so we'd notice if Link.validate_request
+        # or Packet.pack change shape on a future rns release. A
+        # temporary identity file is generated via RNS and fed in.
+        run: |
+          python - <<'PY'
+          import json, os, tempfile
+          from RNS.Cryptography import Ed25519PrivateKey, X25519PrivateKey
+          enc = X25519PrivateKey.generate()
+          sig = Ed25519PrivateKey.generate()
+          payload = {
+              "encPrivKey": list(enc.private_bytes()),
+              "sigPrivKey": list(sig.private_bytes()),
+          }
+          path = os.path.join(tempfile.gettempdir(), "ci_identity.json")
+          with open(path, "w") as f:
+              json.dump(payload, f)
+          print("wrote", path)
+          PY
+          python tools/rns_responder.py "${TMPDIR:-/tmp}/ci_identity.json"
+
+      - name: Run verify_announce.py smoke test
+        # Same idea, different path: builds an lxmf.delivery announce
+        # through RNS with the CI identity and confirms
+        # Identity.validate_announce still accepts our packed form.
+        run: python tools/verify_announce.py "${TMPDIR:-/tmp}/ci_identity.json" --name CIWebClient
