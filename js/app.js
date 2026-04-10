@@ -12,21 +12,11 @@ import { unpackMessage, verifyMessageSignature, packMessage } from './lxmf.js';
 import { openDatabase, saveIdentity, loadIdentity, saveContact, getContact, getAllContacts, saveMessage, getMessages } from './store.js';
 
 const $ = id => document.getElementById(id);
-const rnode = new RNode();
 
-// ---- State -----------------------------------------------------------
-
-let myIdentity = null;     // Identity instance
-let myDestHash = null;     // Our LXMF destination hash (16 bytes)
-let contacts = new Map();  // hash_hex → { hash, publicKey, displayName, destHash, identity }
-let activeContactHash = null;
-let radioOn = false;
-
-// ---- Logging ---------------------------------------------------------
-
+// Logging — declared early so error handlers can use it
 function log(cls, msg) {
   const el = $('log');
-  if (!el) return;
+  if (!el) { console.log(`[${cls}]`, msg); return; }
   const div = document.createElement('div');
   if (cls) div.className = cls;
   const ts = new Date().toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
@@ -35,6 +25,24 @@ function log(cls, msg) {
   el.scrollTop = el.scrollHeight;
   while (el.childNodes.length > 500) el.removeChild(el.firstChild);
 }
+
+// Global error handler — show errors in the visible log
+window.addEventListener('error', (e) => {
+  log('err', `JS error: ${e.message} (${e.filename}:${e.lineno})`);
+});
+window.addEventListener('unhandledrejection', (e) => {
+  log('err', `Unhandled promise: ${e.reason?.message || e.reason}`);
+});
+
+let rnode = new RNode('ble');  // default; can be reassigned
+
+// ---- State -----------------------------------------------------------
+
+let myIdentity = null;     // Identity instance
+let myDestHash = null;     // Our LXMF destination hash (16 bytes)
+let contacts = new Map();  // hash_hex → { hash, publicKey, displayName, destHash, identity }
+let activeContactHash = null;
+let radioOn = false;
 
 rnode._onLog = (msg) => log('info', msg);
 
@@ -74,7 +82,7 @@ async function initIdentity() {
 
 // ---- Packet handling -------------------------------------------------
 
-rnode._onPacket = async (data, rssi, snr) => {
+async function onPacket(data, rssi, snr) {
   const pkt = parsePacket(data);
   if (!pkt) {
     log('rx', `RX ${data.length}B RSSI=${rssi} SNR=${snr} (invalid header)`);
@@ -89,7 +97,9 @@ rnode._onPacket = async (data, rssi, snr) => {
   } else if (pkt.packetType === PACKET_DATA) {
     await handleData(pkt, rssi);
   }
-};
+}
+
+rnode._onPacket = onPacket;
 
 // ---- Announce handling -----------------------------------------------
 
@@ -331,14 +341,25 @@ function escapeHtml(str) {
 // ---- Event wiring ----------------------------------------------------
 
 // Connect
-$('btn-connect').addEventListener('click', async () => {
+async function connect(transportType) {
+  const btnBle = $('btn-connect-ble');
+  const btnSerial = $('btn-connect-serial');
   try {
-    $('btn-connect').disabled = true;
+    btnBle.disabled = true;
+    btnSerial.disabled = true;
+
+    // Re-instantiate RNode with chosen transport
+    rnode = new RNode(transportType);
+    rnode._onLog = (msg) => log('info', msg);
+    rnode._onPacket = onPacket;
+
     await rnode.connect();
 
     $('conn-dot').classList.add('on');
-    $('conn-text').textContent = 'Connected';
+    $('conn-text').textContent = `Connected (${transportType.toUpperCase()})`;
     $('btn-disconnect').classList.remove('hidden');
+    btnBle.classList.add('hidden');
+    btnSerial.classList.add('hidden');
 
     const detected = await rnode.detect();
     if (!detected) { log('err', 'RNode detect failed'); return; }
@@ -356,15 +377,21 @@ $('btn-connect').addEventListener('click', async () => {
   } catch (e) {
     log('err', 'Connect: ' + e.message);
   } finally {
-    $('btn-connect').disabled = false;
+    btnBle.disabled = false;
+    btnSerial.disabled = false;
   }
-});
+}
+
+$('btn-connect-ble').addEventListener('click', () => connect('ble'));
+$('btn-connect-serial').addEventListener('click', () => connect('serial'));
 
 $('btn-disconnect').addEventListener('click', async () => {
   await rnode.disconnect();
   $('conn-dot').classList.remove('on');
   $('conn-text').textContent = 'Disconnected';
   $('btn-disconnect').classList.add('hidden');
+  $('btn-connect-ble').classList.remove('hidden');
+  $('btn-connect-serial').classList.remove('hidden');
   $('config-panel').classList.add('hidden');
   $('messaging-panel').classList.add('hidden');
   radioOn = false;
@@ -428,8 +455,16 @@ $('msg-content').addEventListener('keydown', (e) => {
 // Log
 $('btn-clear-log').addEventListener('click', () => { $('log').innerHTML = ''; });
 
-// Browser check
+// Browser check — disable buttons for unsupported transports
 if (!navigator.bluetooth) {
+  $('btn-connect-ble').disabled = true;
+  $('btn-connect-ble').textContent = 'Connect (BLE — not supported)';
+}
+if (!navigator.serial) {
+  $('btn-connect-serial').disabled = true;
+  $('btn-connect-serial').textContent = 'Connect (Serial — not supported)';
+}
+if (!navigator.bluetooth && !navigator.serial) {
   $('unsupported').classList.remove('hidden');
 }
 
