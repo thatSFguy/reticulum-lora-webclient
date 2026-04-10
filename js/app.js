@@ -107,18 +107,23 @@ async function initIdentity() {
   $('my-address').textContent = toHex(myDestHash);
   log('info', `LXMF address: ${toHex(myDestHash)}`);
 
-  // Load saved contacts. Drop legacy records that were saved before
-  // the announce parser learned to filter by name_hash — these are
-  // mostly repeater telemetry beacons (display name starts with
-  // "bat=") and announces from non-LXMF destinations whose name_hash
-  // we now stored on the row but does not match lxmf.delivery.
+  // Load saved contacts. Drop every legacy record that does not have
+  // a stored name_hash, because before the announce parser learned
+  // to filter by name_hash we accepted announces from any destination
+  // (telemetry beacons, heartbeats, auxiliary destinations on the
+  // same identity as a real LXMF presence) and there is no reliable
+  // way to tell which legacy rows were legitimate after the fact.
+  // Anything genuine will get re-added on the next announce we hear
+  // from its owner, this time with name_hash present and verified.
+  // Records that DO carry a name_hash and don't match lxmf.delivery
+  // are also dropped — same reason, just a different code path.
   const savedContacts = await getAllContacts();
   const expectedNameHashHex = toHex(lxmfNameHash);
   let purged = 0;
   for (const c of savedContacts) {
-    const looksLikeTelemetry = typeof c.displayName === 'string' && /^bat=\d+;/.test(c.displayName);
+    const noNameHash = !c.nameHash;
     const wrongNameHash = c.nameHash && toHex(new Uint8Array(c.nameHash)) !== expectedNameHashHex;
-    if (looksLikeTelemetry || wrongNameHash) {
+    if (noNameHash || wrongNameHash) {
       await deleteMessagesForContact(c.hash);
       await deleteContact(c.hash);
       purged++;
@@ -132,7 +137,7 @@ async function initIdentity() {
     contacts.set(c.hash, { ...c, identity, destHash });
   }
   if (purged > 0) {
-    log('info', `Removed ${purged} non-LXMF contact${purged === 1 ? '' : 's'} from storage`);
+    log('info', `Removed ${purged} legacy contact${purged === 1 ? '' : 's'} (no verifiable name_hash); valid LXMF peers will return on their next announce`);
   }
   renderContactList();
 }
@@ -336,17 +341,6 @@ async function handleLinkRequest(pkt) {
     log('info', `  LR sigpub=${toHex(linkToStore.ourSigPub)}`);
     log('info', `  LR signed(${linkToStore.signedData.length})=${toHex(linkToStore.signedData)}`);
     log('info', `  LRPROOF tx(${proofPacket.length})=${toHex(proofPacket)}`);
-
-    // Refresh our announce before the proof goes out, so whatever
-    // transport node is sitting between us and the initiator cannot
-    // be serving a stale identity for our destination when the
-    // initiator reconstructs signed_data to verify our signature.
-    // Cheap insurance against path-table rot.
-    try {
-      await sendAnnounce();
-    } catch (e) {
-      log('info', `  (pre-LRPROOF announce failed: ${e.message})`);
-    }
 
     await rnode.sendPacket(proofPacket);
 
