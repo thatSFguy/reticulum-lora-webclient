@@ -2,6 +2,7 @@
 
 'use strict';
 
+import { encode as msgpackEncode } from '@msgpack/msgpack';
 import { RNode } from './rnode.js';
 import { toHex } from './kiss.js';
 import { Identity, computeDestinationHash, computeNameHash } from './identity.js';
@@ -267,7 +268,9 @@ async function sendAnnounce() {
   if (!radioOn || !myIdentity) { log('err', 'Radio not on or identity not ready'); return; }
 
   const displayName = $('my-name').value.trim() || 'WebClient';
-  const appData = new TextEncoder().encode(displayName);
+  // LXMF/Sideband format: msgpack([display_name_bytes, stamp_cost])
+  const nameBytes = new TextEncoder().encode(displayName);
+  const appData = new Uint8Array(msgpackEncode([nameBytes, 0]));
 
   const { destHash, payload } = await buildAnnounce(myIdentity, 'lxmf.delivery', appData);
 

@@ -9,6 +9,7 @@
 'use strict';
 
 import { ed25519 } from '@noble/curves/ed25519';
+import { decode as msgpackDecode } from '@msgpack/msgpack';
 import { Identity, computeDestinationHash, computeNameHash, sha256, truncatedHash } from './identity.js';
 import { KEYSIZE, SIGLENGTH, NAME_HASH_LENGTH, TRUNCATED_HASHLENGTH } from './reticulum.js';
 import { toHex } from './kiss.js';
@@ -93,11 +94,35 @@ export async function buildAnnounce(identity, appName = 'lxmf.delivery', appData
   return { destHash, payload };
 }
 
-// Extract display name from announce app_data (if present)
+// Extract display name from announce app_data.
+// LXMF/Sideband announces app_data as msgpack, typically:
+//   [display_name_bytes, stamp_cost]
+// or sometimes a raw UTF-8 string. Try msgpack first, fall back to UTF-8.
 export function extractDisplayName(appData) {
   if (!appData || appData.length === 0) return null;
+
+  // Try msgpack decode
   try {
-    return new TextDecoder().decode(appData);
+    const decoded = msgpackDecode(appData);
+    if (Array.isArray(decoded) && decoded.length > 0) {
+      // First element is the display name (bytes or string)
+      const name = decoded[0];
+      if (name instanceof Uint8Array) {
+        return new TextDecoder('utf-8', { fatal: false }).decode(name);
+      }
+      if (typeof name === 'string') return name;
+    }
+    if (typeof decoded === 'string') return decoded;
+    if (decoded instanceof Uint8Array) {
+      return new TextDecoder('utf-8', { fatal: false }).decode(decoded);
+    }
+  } catch {
+    // Not valid msgpack — fall through to raw UTF-8
+  }
+
+  // Fall back: try raw UTF-8 (strict, returns null on invalid bytes)
+  try {
+    return new TextDecoder('utf-8', { fatal: true }).decode(appData);
   } catch {
     return null;
   }
