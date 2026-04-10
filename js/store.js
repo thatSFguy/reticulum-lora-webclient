@@ -155,3 +155,36 @@ export async function getAllMessages() {
     req.onerror = () => reject(req.error);
   });
 }
+
+// Fetch a single message row by its auto-increment id. Returns null
+// if the row has been deleted in the meantime.
+export async function getMessageById(id) {
+  const d = await openDatabase();
+  const tx = d.transaction('messages', 'readonly');
+  const req = tx.objectStore('messages').get(id);
+  return new Promise((resolve, reject) => {
+    req.onsuccess = () => resolve(req.result || null);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+// Read-modify-write a message row by id. Merges `updates` into the
+// existing row and writes it back. Safe to call even if the row has
+// been deleted — returns null in that case.
+export async function updateMessage(id, updates) {
+  const d = await openDatabase();
+  const tx = d.transaction('messages', 'readwrite');
+  const store = tx.objectStore('messages');
+  return new Promise((resolve, reject) => {
+    const getReq = store.get(id);
+    getReq.onsuccess = () => {
+      const row = getReq.result;
+      if (!row) { resolve(null); return; }
+      Object.assign(row, updates);
+      const putReq = store.put(row);
+      putReq.onsuccess = () => resolve(row);
+      putReq.onerror = () => reject(putReq.error);
+    };
+    getReq.onerror = () => reject(getReq.error);
+  });
+}

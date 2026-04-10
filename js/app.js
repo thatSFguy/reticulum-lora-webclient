@@ -19,7 +19,23 @@ const CTX_KEEPALIVE = 0xFA;
 const CTX_LINKCLOSE = 0xFC;
 const CTX_LRRTT     = 0xFE;
 const CTX_LRPROOF   = 0xFF;
-import { openDatabase, saveIdentity, loadIdentity, saveContact, getContact, getAllContacts, deleteContact, deleteMessagesForContact, saveMessage, getMessages } from './store.js';
+
+// Outbound message state machine. A row in IndexedDB with
+// direction='outgoing' transitions through these states as the
+// retry tick drives it forward.
+const MSG_STATE_PENDING   = 'pending';    // queued, radio off or prior send failed
+const MSG_STATE_SENDING   = 'sending';    // TX in flight right now
+const MSG_STATE_SENT      = 'sent';       // TX completed, awaiting delivery receipt
+const MSG_STATE_DELIVERED = 'delivered';  // inbound PROOF matched this packet hash
+const MSG_STATE_FAILED    = 'failed';     // all retries exhausted
+
+const MSG_MAX_ATTEMPTS = 3;
+// Wait-for-ack schedule. Index is (attempts - 1): first entry is
+// the wait after the 1st send, second is after the 2nd retransmit,
+// etc. After MSG_MAX_ATTEMPTS attempts the row transitions to failed.
+const MSG_BACKOFF_MS = [5000, 15000, 60000];
+const MSG_RETRY_TICK_MS = 5000;
+import { openDatabase, saveIdentity, loadIdentity, saveContact, getContact, getAllContacts, deleteContact, deleteMessagesForContact, saveMessage, getMessages, getAllMessages, getMessageById, updateMessage } from './store.js';
 
 const $ = id => document.getElementById(id);
 
@@ -89,6 +105,7 @@ let radioOn = false;
 let links = new Map();     // hex link_id → Link instance (incoming links only)
 let lxmfNameHash = null;   // SHA256("lxmf.delivery")[:10], cached
 let announceTimer = null;  // setInterval handle for the periodic announce
+let outboundRetryTimer = null;  // setInterval handle for the outbound retry tick
 
 rnode._onLog = (msg) => log('info', msg);
 
@@ -179,10 +196,17 @@ async function onPacket(data, rssi, snr) {
       log('info', `  LINKREQUEST dest=${toHex(pkt.destHash).substring(0,16)}... (not for us)`);
     }
   } else if (pkt.packetType === PACKET_PROOF) {
-    // PROOF packets we might see: LRPROOF from a responder to some
-    // initiator on the mesh (we never initiate links), and packet
-    // proofs for opportunistic messages we've sent. Both are fine to
-    // ignore at this layer.
+    // Two kinds of PROOFs we actually care about:
+    //   1. Delivery receipts for our outbound opportunistic
+    //      messages. These are addressed to the truncated hash of
+    //      the original packet, so the dest slot in the header is
+    //      the key to look up against our saved outgoing rows.
+    //   2. LRPROOFs on the mesh (context=0xFF). These are responses
+    //      to link requests we never sent, since we are responder-
+    //      only, so they are not ours to process.
+    if (pkt.context !== CTX_LRPROOF) {
+      await handleDeliveryProof(pkt);
+    }
   }
 }
 
@@ -465,7 +489,7 @@ async function handleLinkData(pkt, rssi) {
 // ---- Send message ----------------------------------------------------
 
 async function sendMessage() {
-  if (!activeContactHash || !radioOn) return;
+  if (!activeContactHash) return;
 
   const content = $('msg-content').value.trim();
   if (!content) return;
@@ -474,8 +498,6 @@ async function sendMessage() {
   if (!contact) { log('err', 'Contact not found'); return; }
 
   try {
-    log('info', `Sending to "${contact.displayName}"...`);
-
     // Pack LXMF message. LXMF's source_hash field is the sender's
     // LXMF delivery *destination* hash, not the identity hash —
     // receivers key their contact table on destination hashes.
@@ -503,23 +525,158 @@ async function sendMessage() {
       return;
     }
 
-    // Send via RNode
-    await rnode.sendPacket(packet);
-    log('ok', `Sent ${packet.length}B to "${contact.displayName}"`);
+    // Compute the truncated (16 B) packet hash so we can match any
+    // delivery PROOF that comes back later. The dest_hash slot of a
+    // non-link PROOF packet carries this truncated hash, so this is
+    // the key we look up on.
+    const packetHashHex = toHex(await computeOutboundPacketHashTruncated(packet));
 
-    // Save message
-    await saveMessage({
+    // Save a pending row before touching the radio so the message
+    // is durable even if the send call throws or the user
+    // reloads mid-transmission.
+    const row = {
       contactHash: activeContactHash,
       direction: 'outgoing',
       content,
       title: '',
       timestamp: Date.now(),
-    });
+      state: radioOn ? MSG_STATE_SENDING : MSG_STATE_PENDING,
+      packetHash: packetHashHex,
+      rawPacket: Array.from(packet),
+      attempts: 0,
+      nextRetryAt: 0,
+    };
+    const id = await saveMessage(row);
 
     $('msg-content').value = '';
     await renderMessages(activeContactHash);
+
+    if (radioOn) {
+      await doOutboundSend(id);
+    } else {
+      log('info', `Queued message to "${contact.displayName}" (radio off)`);
+    }
   } catch (e) {
     log('err', `Send failed: ${e.message}`);
+  }
+}
+
+// Compute the 16-byte truncated SHA-256 of the hashable part of a
+// newly-built outbound packet. The dest_hash field of any inbound
+// delivery PROOF for this packet will equal this value, so it is
+// the key we store on the outgoing row and match on.
+async function computeOutboundPacketHashTruncated(packet) {
+  const flagsLow = packet[0] & 0x0F;
+  // HEADER_1: skip flags + hops (2 bytes). HEADER_2 skips 18, but
+  // every packet we originate is HEADER_1.
+  const tail = packet.subarray(2);
+  const hp = new Uint8Array(1 + tail.length);
+  hp[0] = flagsLow;
+  hp.set(tail, 1);
+  const fullBuf = await crypto.subtle.digest('SHA-256', hp);
+  return new Uint8Array(fullBuf).subarray(0, 16);
+}
+
+// Core outbound send/retry path. Reads the row from IndexedDB,
+// transmits the stored rawPacket, and writes back the new state
+// (sent + nextRetryAt on success, pending or failed on error).
+// Invoked from sendMessage for a fresh row and from the retry tick
+// for a row whose nextRetryAt has passed.
+async function doOutboundSend(id) {
+  const row = await getMessageById(id);
+  if (!row) return;
+  if (row.state === MSG_STATE_DELIVERED || row.state === MSG_STATE_FAILED) return;
+  if (!row.rawPacket) return;   // legacy row without a packet — nothing to retransmit
+
+  const contact = contacts.get(row.contactHash);
+  const label = contact ? contact.displayName : row.contactHash.substring(0, 12);
+  const attemptNumber = (row.attempts || 0) + 1;
+
+  await updateMessage(id, { state: MSG_STATE_SENDING, attempts: attemptNumber });
+  if (activeContactHash === row.contactHash) {
+    await renderMessages(activeContactHash);
+  }
+
+  const packet = new Uint8Array(row.rawPacket);
+  try {
+    log('info', `Sending to "${label}"${attemptNumber > 1 ? ` (attempt ${attemptNumber})` : ''}...`);
+    await rnode.sendPacket(packet);
+    log('ok', `Sent ${packet.length}B to "${label}"`);
+
+    const backoffIndex = Math.min(attemptNumber - 1, MSG_BACKOFF_MS.length - 1);
+    await updateMessage(id, {
+      state: MSG_STATE_SENT,
+      nextRetryAt: Date.now() + MSG_BACKOFF_MS[backoffIndex],
+      lastError: null,
+    });
+  } catch (e) {
+    log('err', `Send failed: ${e.message}`);
+    const isFinal = attemptNumber >= MSG_MAX_ATTEMPTS;
+    const backoffIndex = Math.min(attemptNumber - 1, MSG_BACKOFF_MS.length - 1);
+    await updateMessage(id, {
+      state: isFinal ? MSG_STATE_FAILED : MSG_STATE_PENDING,
+      nextRetryAt: isFinal ? 0 : Date.now() + MSG_BACKOFF_MS[backoffIndex],
+      lastError: e.message,
+    });
+  }
+
+  if (activeContactHash === row.contactHash) {
+    await renderMessages(activeContactHash);
+  }
+}
+
+// Walk every outgoing row and drive the state machine forward for
+// anything that is overdue. Pending rows get a fresh send attempt
+// now that the radio is up. Sent rows whose ack timeout has fired
+// either retry or transition to failed. Terminal states are
+// skipped. Runs on a setInterval that only lives while the radio
+// is on.
+async function outboundRetryTick() {
+  if (!radioOn) return;
+  const rows = await getAllMessages();
+  const now = Date.now();
+
+  for (const row of rows) {
+    if (row.direction !== 'outgoing') continue;
+    if (row.state === MSG_STATE_DELIVERED || row.state === MSG_STATE_FAILED) continue;
+
+    if (row.state === MSG_STATE_PENDING && (row.attempts || 0) < MSG_MAX_ATTEMPTS) {
+      await doOutboundSend(row.id);
+      continue;
+    }
+
+    if (row.state === MSG_STATE_SENT && row.nextRetryAt && now >= row.nextRetryAt) {
+      if ((row.attempts || 0) >= MSG_MAX_ATTEMPTS) {
+        await updateMessage(row.id, { state: MSG_STATE_FAILED });
+        if (activeContactHash === row.contactHash) {
+          await renderMessages(activeContactHash);
+        }
+      } else {
+        await doOutboundSend(row.id);
+      }
+    }
+  }
+}
+
+// Match an inbound PROOF packet against outstanding outgoing rows.
+// The packet's destination_hash is the 16-byte truncated hash of the
+// original packet being acknowledged, so it lines up directly with
+// the packetHash we stored on the row at send time. If a match is
+// found, mark the row as delivered.
+async function handleDeliveryProof(pkt) {
+  const hashHex = toHex(pkt.destHash);
+  const rows = await getAllMessages();
+  for (const row of rows) {
+    if (row.direction !== 'outgoing') continue;
+    if (row.packetHash !== hashHex) continue;
+    if (row.state === MSG_STATE_DELIVERED) return;
+    await updateMessage(row.id, { state: MSG_STATE_DELIVERED });
+    const preview = (row.content || '').substring(0, 24);
+    log('ok', `  Delivery proof matched outbound "${preview}"`);
+    if (activeContactHash === row.contactHash) {
+      await renderMessages(activeContactHash);
+    }
+    return;
   }
 }
 
@@ -635,10 +792,33 @@ async function renderMessages(contactHash) {
     div.className = `message ${msg.direction}`;
     const ts = normalizeLxmfTimestamp(msg.timestamp);
     const time = ts != null ? formatMessageTime(ts) : '(no time)';
-    div.innerHTML = `<div>${escapeHtml(msg.content)}</div><div class="meta">${time}</div>`;
+    const stateIcon = renderOutgoingStateIcon(msg);
+    div.innerHTML = `<div>${escapeHtml(msg.content)}</div><div class="meta">${time}${stateIcon}</div>`;
     list.appendChild(div);
   }
   list.scrollTop = list.scrollHeight;
+}
+
+// Small state indicator for outgoing rows. Returns HTML that lives
+// inline next to the timestamp in the message meta line. Incoming
+// rows and legacy outgoing rows (saved before the retry queue
+// landed, no `state` field) return an empty string.
+function renderOutgoingStateIcon(msg) {
+  if (msg.direction !== 'outgoing' || !msg.state) return '';
+  const labels = {
+    [MSG_STATE_PENDING]:   ['\u23F3', 'pending'],    // hourglass
+    [MSG_STATE_SENDING]:   ['\u2191', 'sending'],    // up arrow
+    [MSG_STATE_SENT]:      ['\u2713', 'sent'],        // single check
+    [MSG_STATE_DELIVERED]: ['\u2713\u2713', 'delivered'],   // double check
+    [MSG_STATE_FAILED]:    ['\u2717', 'failed'],      // cross
+  };
+  const entry = labels[msg.state];
+  if (!entry) return '';
+  const [glyph, cls] = entry;
+  const title = msg.state === MSG_STATE_FAILED && msg.lastError
+    ? ` title="${escapeHtml(msg.lastError)}"`
+    : '';
+  return ` <span class="message-state ${cls}"${title}>${glyph}</span>`;
 }
 
 // Format a message timestamp. Shows "HH:MM" for messages from today,
@@ -714,6 +894,7 @@ $('btn-connect-serial').addEventListener('click', () => connect('serial'));
 
 $('btn-disconnect').addEventListener('click', async () => {
   if (announceTimer) { clearInterval(announceTimer); announceTimer = null; }
+  if (outboundRetryTimer) { clearInterval(outboundRetryTimer); outboundRetryTimer = null; }
   await rnode.disconnect();
   $('conn-dot').classList.remove('on');
   $('conn-text').textContent = 'Disconnected';
@@ -759,6 +940,17 @@ async function startRadio() {
           sendAnnounce().catch(e => log('info', `Periodic announce skipped: ${e.message}`));
         }
       }, 5 * 60 * 1000);
+
+      // Start the outbound retry tick now that the radio is up.
+      // Any outbound rows that were saved while the radio was off
+      // will get picked up on the first tick.
+      if (outboundRetryTimer) clearInterval(outboundRetryTimer);
+      outboundRetryTimer = setInterval(() => {
+        outboundRetryTick().catch(e => log('info', `Retry tick error: ${e.message}`));
+      }, MSG_RETRY_TICK_MS);
+      // Kick one immediately so queued rows don't have to wait up
+      // to MSG_RETRY_TICK_MS for their first attempt.
+      outboundRetryTick().catch(e => log('info', `Retry tick error: ${e.message}`));
     }
   } catch (e) { log('err', 'Radio: ' + e.message); }
 }
