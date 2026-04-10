@@ -98,6 +98,31 @@ export async function getAllContacts() {
   });
 }
 
+export async function deleteContact(hash) {
+  const d = await openDatabase();
+  const tx = d.transaction('contacts', 'readwrite');
+  tx.objectStore('contacts').delete(hash);
+  return new Promise((resolve, reject) => {
+    tx.oncomplete = resolve;
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+export async function deleteMessagesForContact(contactHash) {
+  const d = await openDatabase();
+  const tx = d.transaction('messages', 'readwrite');
+  const index = tx.objectStore('messages').index('contact');
+  const req = index.openCursor(contactHash);
+  return new Promise((resolve, reject) => {
+    req.onsuccess = (e) => {
+      const cursor = e.target.result;
+      if (cursor) { cursor.delete(); cursor.continue(); }
+    };
+    tx.oncomplete = resolve;
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
 // ---- Messages --------------------------------------------------------
 
 export async function saveMessage(message) {

@@ -10,7 +10,7 @@ import { parsePacket, buildPacket, PACKET_ANNOUNCE, PACKET_DATA, DEST_SINGLE, HE
 import { parseAnnounce, validateAnnounce, buildAnnounce, extractDisplayName, concatBytes, arraysEqual } from './announce.js';
 import { encrypt, decrypt } from './crypto.js';
 import { unpackMessage, verifyMessageSignature, packMessage } from './lxmf.js';
-import { openDatabase, saveIdentity, loadIdentity, saveContact, getContact, getAllContacts, saveMessage, getMessages } from './store.js';
+import { openDatabase, saveIdentity, loadIdentity, saveContact, getContact, getAllContacts, deleteContact, deleteMessagesForContact, saveMessage, getMessages } from './store.js';
 
 const $ = id => document.getElementById(id);
 
@@ -336,10 +336,44 @@ function renderContactList() {
   for (const [hash, c] of contacts) {
     const li = document.createElement('li');
     li.className = hash === activeContactHash ? 'active' : '';
-    li.innerHTML = `<div><div class="contact-name">${escapeHtml(c.displayName)}</div><div class="contact-hash">${hash.substring(0, 16)}...</div></div>`;
-    li.addEventListener('click', () => selectContact(hash));
+
+    const info = document.createElement('div');
+    info.innerHTML = `<div class="contact-name">${escapeHtml(c.displayName)}</div><div class="contact-hash">${hash.substring(0, 16)}...</div>`;
+    info.addEventListener('click', () => selectContact(hash));
+
+    const del = document.createElement('button');
+    del.className = 'contact-delete';
+    del.title = 'Delete contact';
+    del.textContent = '\u00d7';
+    del.addEventListener('click', (e) => {
+      e.stopPropagation();
+      removeContact(hash);
+    });
+
+    li.appendChild(info);
+    li.appendChild(del);
     list.appendChild(li);
   }
+}
+
+async function removeContact(hash) {
+  const c = contacts.get(hash);
+  const label = c ? `"${c.displayName}"` : hash.substring(0, 16);
+  if (!confirm(`Delete ${label} and all messages with them?`)) return;
+
+  contacts.delete(hash);
+  await deleteMessagesForContact(hash);
+  await deleteContact(hash);
+
+  if (activeContactHash === hash) {
+    activeContactHash = null;
+    $('conv-title').textContent = 'Select a contact';
+    $('compose-area').classList.add('hidden');
+    $('message-list').innerHTML = '';
+  }
+
+  renderContactList();
+  log('info', `Deleted contact ${label}`);
 }
 
 async function selectContact(hash) {
