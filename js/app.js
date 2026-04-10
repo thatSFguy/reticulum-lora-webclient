@@ -79,6 +79,7 @@ let activeContactHash = null;
 let radioOn = false;
 let links = new Map();     // hex link_id → Link instance (incoming links only)
 let lxmfNameHash = null;   // SHA256("lxmf.delivery")[:10], cached
+let announceTimer = null;  // setInterval handle for the periodic announce
 
 rnode._onLog = (msg) => log('info', msg);
 
@@ -293,9 +294,17 @@ async function dispatchIncomingMessage(msg, rssi) {
     rssi,
   };
   await saveMessage(savedMsg);
+  log('info', `  Saved under contactHash=${savedMsg.contactHash.substring(0, 16)}... activeContact=${activeContactHash ? activeContactHash.substring(0, 16) + '...' : '(none)'}`);
 
   if (activeContactHash === savedMsg.contactHash) {
     await renderMessages(activeContactHash);
+  }
+  // Flag the contact as having unread traffic so the sidebar shows
+  // something even when the user isn't currently in that conversation.
+  const c = contacts.get(savedMsg.contactHash);
+  if (c) {
+    c.unreadCount = (c.unreadCount || 0) + 1;
+    renderContactList();
   }
 }
 
@@ -503,8 +512,9 @@ function renderContactList() {
     const li = document.createElement('li');
     li.className = hash === activeContactHash ? 'active' : '';
 
+    const unread = c.unreadCount ? ` <span class="contact-unread">${c.unreadCount}</span>` : '';
     const info = document.createElement('div');
-    info.innerHTML = `<div class="contact-name">${escapeHtml(c.displayName)}</div><div class="contact-hash">${hash.substring(0, 16)}...</div>`;
+    info.innerHTML = `<div class="contact-name">${escapeHtml(c.displayName)}${unread}</div><div class="contact-hash">${hash.substring(0, 16)}...</div>`;
     info.addEventListener('click', () => selectContact(hash));
 
     const del = document.createElement('button');
@@ -545,6 +555,7 @@ async function removeContact(hash) {
 async function selectContact(hash) {
   activeContactHash = hash;
   const c = contacts.get(hash);
+  if (c) c.unreadCount = 0;
   $('conv-title').textContent = c ? c.displayName : hash.substring(0, 16);
   $('compose-area').classList.remove('hidden');
   renderContactList();
@@ -647,6 +658,7 @@ $('btn-connect-ble').addEventListener('click', () => connect('ble'));
 $('btn-connect-serial').addEventListener('click', () => connect('serial'));
 
 $('btn-disconnect').addEventListener('click', async () => {
+  if (announceTimer) { clearInterval(announceTimer); announceTimer = null; }
   await rnode.disconnect();
   $('conn-dot').classList.remove('on');
   $('conn-text').textContent = 'Disconnected';
@@ -674,15 +686,24 @@ async function startRadio() {
     $('radio-status').className = on ? 'status-on' : 'status-off';
     if (on) {
       log('ok', 'Radio on');
-      // Emit one announce as soon as the radio is up so every RNS node
-      // in earshot has our current identity in its path table. Without
-      // this, any relay that validates inbound LRPROOFs by recalling
-      // the responder identity will silently drop our proofs if our
-      // entry isn't in its cache — the exact symptom of incoming link
-      // handshakes stalling even though our LRPROOF bytes verify.
-      // Best-effort only; if the announce fails (radio busy, etc.)
-      // the user can still hit the Announce button manually.
+      // Emit one announce right away and then again every 5 minutes so
+      // every RNS relay in reach keeps our identity warm in its path
+      // table / known_destinations cache. The relay-side validation of
+      // inbound LRPROOFs calls Identity.recall(destination_hash), and
+      // if our entry has been GC'd or never made it past a further hop
+      // the proof is silently dropped — the exact symptom of incoming
+      // link handshakes stalling. Periodic re-announce is what every
+      // long-running Python RNS daemon does by default (Sideband uses
+      // 30 minutes; we use 5 because the test bench has a small mesh).
+      // Best-effort: swallow errors so a transient send failure can't
+      // take down the timer.
       sendAnnounce().catch(e => log('info', `Startup announce skipped: ${e.message}`));
+      if (announceTimer) clearInterval(announceTimer);
+      announceTimer = setInterval(() => {
+        if (radioOn) {
+          sendAnnounce().catch(e => log('info', `Periodic announce skipped: ${e.message}`));
+        }
+      }, 5 * 60 * 1000);
     }
   } catch (e) { log('err', 'Radio: ' + e.message); }
 }
