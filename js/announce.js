@@ -1,0 +1,132 @@
+// js/announce.js — Reticulum announce build/parse/validate.
+//
+// Announce data layout (after Reticulum header):
+//   public_key(64) + name_hash(10) + random_hash(10) +
+//   [ratchet(32) if context_flag] + signature(64) + [app_data]
+//
+// Signed data = dest_hash + public_key + name_hash + random_hash + [ratchet] + app_data
+
+'use strict';
+
+import { Identity, computeDestinationHash, computeNameHash, sha256, truncatedHash } from './identity.js';
+import { KEYSIZE, SIGLENGTH, NAME_HASH_LENGTH, TRUNCATED_HASHLENGTH } from './reticulum.js';
+import { toHex } from './kiss.js';
+
+// Parse an announce packet's payload (data after Reticulum header).
+// Returns { publicKey, nameHash, randomHash, ratchet, signature, appData, identityHash, destHash }
+export async function parseAnnounce(payload, contextFlag, destHashFromHeader) {
+  if (payload.length < KEYSIZE + NAME_HASH_LENGTH + NAME_HASH_LENGTH + SIGLENGTH) {
+    return null;  // too short
+  }
+
+  let offset = 0;
+  const publicKey = payload.subarray(offset, offset + KEYSIZE); offset += KEYSIZE;
+  const nameHash  = payload.subarray(offset, offset + NAME_HASH_LENGTH); offset += NAME_HASH_LENGTH;
+  const randomHash = payload.subarray(offset, offset + NAME_HASH_LENGTH); offset += NAME_HASH_LENGTH;
+
+  let ratchet = null;
+  if (contextFlag) {
+    ratchet = payload.subarray(offset, offset + 32); offset += 32;
+  }
+
+  const signature = payload.subarray(offset, offset + SIGLENGTH); offset += SIGLENGTH;
+  const appData   = payload.subarray(offset);
+
+  // Compute identity hash from public key
+  const identityHash = await truncatedHash(publicKey);
+
+  // Compute expected destination hash
+  // We need the app name — for LXMF it's "lxmf.delivery"
+  // We can verify by checking nameHash matches
+  const lxmfNameHash = await computeNameHash('lxmf.delivery');
+  let appName = null;
+  if (arraysEqual(nameHash, lxmfNameHash)) {
+    appName = 'lxmf.delivery';
+  }
+
+  const destHash = appName
+    ? await computeDestinationHash(appName, identityHash)
+    : null;
+
+  return {
+    publicKey, nameHash, randomHash, ratchet, signature, appData,
+    identityHash, destHash, appName,
+  };
+}
+
+// Validate an announce's Ed25519 signature
+export function validateAnnounce(announce, destHashFromHeader) {
+  const { publicKey, nameHash, randomHash, ratchet, signature, appData } = announce;
+
+  // Build signed_data = dest_hash + public_key + name_hash + random_hash + [ratchet] + app_data
+  const parts = [destHashFromHeader, publicKey, nameHash, randomHash];
+  if (ratchet) parts.push(ratchet);
+  parts.push(appData);
+
+  const signedData = concatBytes(parts);
+  const sigPubKey = publicKey.subarray(32, 64);  // Ed25519 public key
+
+  const { ed25519 } = getNoble();
+  try {
+    return ed25519.verify(signature, signedData, sigPubKey);
+  } catch {
+    return false;
+  }
+}
+
+// Build an announce for our identity
+export async function buildAnnounce(identity, appName = 'lxmf.delivery', appData = new Uint8Array(0)) {
+  const nameHash = await computeNameHash(appName);
+  const destHash = await computeDestinationHash(appName, identity.hash);
+
+  // Random hash (10 bytes)
+  const randomHash = new Uint8Array(10);
+  crypto.getRandomValues(randomHash);
+
+  // Build signed_data = dest_hash + public_key + name_hash + random_hash + app_data
+  const signedData = concatBytes([destHash, identity.publicKey, nameHash, randomHash, appData]);
+  const signature = identity.sign(signedData);
+
+  // Announce payload = public_key(64) + name_hash(10) + random_hash(10) + signature(64) + app_data
+  const payload = concatBytes([identity.publicKey, nameHash, randomHash, signature, appData]);
+
+  return { destHash, payload };
+}
+
+// Extract display name from announce app_data (if present)
+export function extractDisplayName(appData) {
+  if (!appData || appData.length === 0) return null;
+  try {
+    return new TextDecoder().decode(appData);
+  } catch {
+    return null;
+  }
+}
+
+// ---- Helpers --------------------------------------------------------
+
+function concatBytes(arrays) {
+  const total = arrays.reduce((sum, a) => sum + a.length, 0);
+  const result = new Uint8Array(total);
+  let offset = 0;
+  for (const a of arrays) {
+    result.set(a, offset);
+    offset += a.length;
+  }
+  return result;
+}
+
+function arraysEqual(a, b) {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    if (a[i] !== b[i]) return false;
+  }
+  return true;
+}
+
+function getNoble() {
+  if (!window.noble_ed25519) throw new Error('@noble/curves not loaded');
+  return { ed25519: window.noble_ed25519 };
+}
+
+export { concatBytes, arraysEqual };
