@@ -4,6 +4,7 @@
 
 import { encode as msgpackEncode } from '@msgpack/msgpack';
 import { RNode } from './rnode.js';
+import { RnsdInterface } from './rnsd-interface.js';
 import { toHex } from './kiss.js';
 import { Identity, computeDestinationHash, computeNameHash } from './identity.js';
 import { parsePacket, buildPacket, PACKET_ANNOUNCE, PACKET_DATA, PACKET_LINKREQ, PACKET_PROOF, DEST_SINGLE, DEST_LINK, HEADER_1, PACKET_TYPE_NAMES } from './reticulum.js';
@@ -1057,12 +1058,22 @@ function escapeHtml(str) {
 async function connect(transportType) {
   const btnBle = $('btn-connect-ble');
   const btnSerial = $('btn-connect-serial');
+  const btnWs = $('btn-connect-ws');
   try {
     btnBle.disabled = true;
     btnSerial.disabled = true;
+    btnWs.disabled = true;
 
-    // Re-instantiate RNode with chosen transport
-    rnode = new RNode(transportType);
+    // Pick the right interface based on transport type.
+    //   'ble' / 'serial' → RNode-over-KISS (owns a radio)
+    //   'ws'             → rnsd-over-HDLC (no radio, direct to a Reticulum daemon)
+    if (transportType === 'ws') {
+      const url = ($('ws-url').value || '').trim();
+      if (!url) { log('err', 'WebSocket URL is empty'); return; }
+      rnode = new RnsdInterface(url);
+    } else {
+      rnode = new RNode(transportType);
+    }
     rnode._onLog = (msg) => log('info', msg);
     rnode._onPacket = onPacket;
 
@@ -1073,30 +1084,67 @@ async function connect(transportType) {
     $('btn-disconnect').classList.remove('hidden');
     btnBle.classList.add('hidden');
     btnSerial.classList.add('hidden');
+    btnWs.classList.add('hidden');
+    $('ws-url-row').classList.add('hidden');
 
-    const detected = await rnode.detect();
-    if (!detected) { log('err', 'RNode detect failed'); return; }
+    // Interfaces with an RNode on the other side (BLE/Serial) need
+    // the full detect/fw/battery/radio-config sequence. Interfaces
+    // that talk directly to a Reticulum daemon via WebSocket skip
+    // all of that — there is no radio to configure.
+    const usesRnode = rnode.capabilities?.rnodeControl !== false;
 
-    const fw = await rnode.getFirmwareVersion();
-    const battery = await rnode.getBattery();
-    log('ok', `RNode FW ${fw?.major}.${fw?.minor}, Bat ${battery}%`);
-
-    // Show panels
-    $('config-panel').classList.remove('hidden');
-    $('messaging-panel').classList.remove('hidden');
-
-    // Auto-start radio with form values
-    await startRadio();
+    if (usesRnode) {
+      const detected = await rnode.detect();
+      if (!detected) { log('err', 'RNode detect failed'); return; }
+      const fw = await rnode.getFirmwareVersion();
+      const battery = await rnode.getBattery();
+      log('ok', `RNode FW ${fw?.major}.${fw?.minor}, Bat ${battery}%`);
+      $('config-panel').classList.remove('hidden');
+      $('messaging-panel').classList.remove('hidden');
+      await startRadio();
+    } else {
+      // WebSocket path: no radio config, no detect, no battery.
+      // Go straight to the "ready for messaging" state that
+      // startRadio would have reached for the RNode path.
+      $('messaging-panel').classList.remove('hidden');
+      log('ok', `Connected to Reticulum network via WebSocket`);
+      markInterfaceReady();
+    }
   } catch (e) {
     log('err', 'Connect: ' + e.message);
   } finally {
     btnBle.disabled = false;
     btnSerial.disabled = false;
+    btnWs.disabled = false;
   }
+}
+
+// Flip the "we are ready to send and receive" bit, fire the startup
+// auto-announce, start the periodic announce timer, and start the
+// outbound retry tick. Called from both the RNode path (after
+// startRadio reports the radio is on) and the WebSocket path (after
+// the socket is up — there is no radio to wait for).
+function markInterfaceReady() {
+  radioOn = true;
+  $('radio-status').textContent = 'Ready';
+  $('radio-status').className = 'status-on';
+  sendAnnounce().catch(e => log('info', `Startup announce skipped: ${e.message}`));
+  if (announceTimer) clearInterval(announceTimer);
+  announceTimer = setInterval(() => {
+    if (radioOn) {
+      sendAnnounce().catch(e => log('info', `Periodic announce skipped: ${e.message}`));
+    }
+  }, 5 * 60 * 1000);
+  if (outboundRetryTimer) clearInterval(outboundRetryTimer);
+  outboundRetryTimer = setInterval(() => {
+    outboundRetryTick().catch(e => log('info', `Retry tick error: ${e.message}`));
+  }, MSG_RETRY_TICK_MS);
+  outboundRetryTick().catch(e => log('info', `Retry tick error: ${e.message}`));
 }
 
 $('btn-connect-ble').addEventListener('click', () => connect('ble'));
 $('btn-connect-serial').addEventListener('click', () => connect('serial'));
+$('btn-connect-ws').addEventListener('click', () => connect('ws'));
 
 $('btn-disconnect').addEventListener('click', async () => {
   if (announceTimer) { clearInterval(announceTimer); announceTimer = null; }
@@ -1107,6 +1155,8 @@ $('btn-disconnect').addEventListener('click', async () => {
   $('btn-disconnect').classList.add('hidden');
   $('btn-connect-ble').classList.remove('hidden');
   $('btn-connect-serial').classList.remove('hidden');
+  $('btn-connect-ws').classList.remove('hidden');
+  $('ws-url-row').classList.remove('hidden');
   $('config-panel').classList.add('hidden');
   $('messaging-panel').classList.add('hidden');
   radioOn = false;
@@ -1123,40 +1173,13 @@ async function startRadio() {
     const cr = parseInt($('cfg-cr').value);
     const txp = parseInt($('cfg-txp').value);
     const on = await rnode.configureAndStart({ freq, bw, sf, cr, txp });
-    radioOn = on;
     $('radio-status').textContent = on ? 'Radio: ON' : '';
     $('radio-status').className = on ? 'status-on' : 'status-off';
     if (on) {
       log('ok', 'Radio on');
-      // Emit one announce right away and then again every 5 minutes so
-      // every RNS relay in reach keeps our identity warm in its path
-      // table / known_destinations cache. The relay-side validation of
-      // inbound LRPROOFs calls Identity.recall(destination_hash), and
-      // if our entry has been GC'd or never made it past a further hop
-      // the proof is silently dropped — the exact symptom of incoming
-      // link handshakes stalling. Periodic re-announce is what every
-      // long-running Python RNS daemon does by default (Sideband uses
-      // 30 minutes; we use 5 because the test bench has a small mesh).
-      // Best-effort: swallow errors so a transient send failure can't
-      // take down the timer.
-      sendAnnounce().catch(e => log('info', `Startup announce skipped: ${e.message}`));
-      if (announceTimer) clearInterval(announceTimer);
-      announceTimer = setInterval(() => {
-        if (radioOn) {
-          sendAnnounce().catch(e => log('info', `Periodic announce skipped: ${e.message}`));
-        }
-      }, 5 * 60 * 1000);
-
-      // Start the outbound retry tick now that the radio is up.
-      // Any outbound rows that were saved while the radio was off
-      // will get picked up on the first tick.
-      if (outboundRetryTimer) clearInterval(outboundRetryTimer);
-      outboundRetryTimer = setInterval(() => {
-        outboundRetryTick().catch(e => log('info', `Retry tick error: ${e.message}`));
-      }, MSG_RETRY_TICK_MS);
-      // Kick one immediately so queued rows don't have to wait up
-      // to MSG_RETRY_TICK_MS for their first attempt.
-      outboundRetryTick().catch(e => log('info', `Retry tick error: ${e.message}`));
+      markInterfaceReady();
+    } else {
+      radioOn = false;
     }
   } catch (e) { log('err', 'Radio: ' + e.message); }
 }
@@ -1201,7 +1224,9 @@ $('msg-content').addEventListener('keydown', (e) => {
 // Log
 $('btn-clear-log').addEventListener('click', () => { $('log').innerHTML = ''; });
 
-// Browser check — disable buttons for unsupported transports
+// Browser check — disable buttons for unsupported transports.
+// WebSocket is available in every modern browser, so it never gets
+// disabled; BLE and Serial still depend on Web Bluetooth / Web Serial.
 if (!navigator.bluetooth) {
   $('btn-connect-ble').disabled = true;
   $('btn-connect-ble').textContent = 'Connect (BLE — not supported)';
@@ -1210,7 +1235,11 @@ if (!navigator.serial) {
   $('btn-connect-serial').disabled = true;
   $('btn-connect-serial').textContent = 'Connect (Serial — not supported)';
 }
-if (!navigator.bluetooth && !navigator.serial) {
+if (typeof WebSocket === 'undefined') {
+  $('btn-connect-ws').disabled = true;
+  $('btn-connect-ws').textContent = 'Connect (WebSocket — not supported)';
+}
+if (!navigator.bluetooth && !navigator.serial && typeof WebSocket === 'undefined') {
   $('unsupported').classList.remove('hidden');
 }
 

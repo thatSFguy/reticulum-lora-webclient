@@ -28,8 +28,15 @@
     <span><span class="status-dot" id="conn-dot"></span><span id="conn-text">Disconnected</span></span>
     <button id="btn-connect-ble">Connect (BLE)</button>
     <button id="btn-connect-serial" class="secondary">Connect (Serial)</button>
+    <button id="btn-connect-ws" class="secondary">Connect (WebSocket)</button>
     <button id="btn-disconnect" class="secondary hidden">Disconnect</button>
     <span id="radio-status" class="status-off"></span>
+  </div>
+  <div class="row" id="ws-url-row" style="margin-top: 8px;">
+    <div class="field wide">
+      <label>WebSocket URL (for TCP-via-bridge)</label>
+      <input id="ws-url" type="text" value="ws://localhost:7878" placeholder="ws://localhost:7878">
+    </div>
   </div>
 </div>
 

@@ -1,15 +1,18 @@
 # reticulum-lora-webclient
 
-A browser-based Reticulum messaging client that talks to an [RNode](https://unsigned.io/rnode) LoRa modem over Web Bluetooth or Web Serial and exchanges encrypted LXMF messages with Sideband, NomadNet, MeshChat, and other Reticulum nodes on a LoRa mesh.
+A browser-based Reticulum messaging client. Connects either directly to an [RNode](https://unsigned.io/rnode) LoRa modem over Web Bluetooth or Web Serial, or to any running Reticulum daemon (`rnsd`) over a WebSocket bridge, and exchanges encrypted LXMF messages with Sideband, NomadNet, MeshChat, and other Reticulum nodes anywhere on the network.
 
 **Live app:** <https://thatsfguy.github.io/reticulum-lora-webclient/>
 
-No build step, no server, no framework. Plain ES modules, loaded directly in the browser. Designed to be served as static files from GitHub Pages or any file host.
+No build step, no framework, no bundler. Plain ES modules, loaded directly in the browser. The LoRa path runs entirely in the browser with no server. The TCP-via-WebSocket path requires a small Python bridge (`tools/ws_bridge.py`, 80 lines) to sit between the browser and an existing `rnsd`.
 
 ## What it does
 
-- Connects to an RNode over Web Bluetooth (primary) or Web Serial (dev fallback).
-- Configures the radio (frequency, bandwidth, spreading factor, coding rate, TX power) and turns it on.
+- Connects over any of three transports:
+  - **Web Bluetooth** to an RNode (primary, Chrome/Edge/Brave on desktop and Android).
+  - **Web Serial** to an RNode (desktop fallback).
+  - **WebSocket** to a local or remote `rnsd` via a small bridge script (any modern browser, including Safari and Firefox).
+- Configures the radio (frequency, bandwidth, spreading factor, coding rate, TX power) and turns it on — when talking to an RNode. When talking to `rnsd` over WebSocket there is no radio to configure; the network config lives on the daemon side.
 - Generates and persists an Ed25519 / X25519 Reticulum identity in IndexedDB.
 - Sends and receives Reticulum announces, auto-announces once at connect and every five minutes thereafter so relay identity caches stay warm.
 - Encrypts and decrypts LXMF messages for **opportunistic single-packet delivery** using the standard Reticulum ECDH + HKDF + AES-256-CBC + HMAC-SHA256 scheme.
@@ -31,15 +34,17 @@ See `CLAUDE.md` for the scope rules and implementation plan, and `docs/PROTOCOL_
 
 ## Platform support
 
-| Platform            | Web Bluetooth | Web Serial | Works? |
-|---------------------|---------------|------------|--------|
-| Chrome Android      | Yes           | No         | Primary target |
-| Chrome/Edge desktop | Yes           | Yes        | Dev and daily use |
-| Brave desktop       | Yes           | Yes        | Works |
-| Safari (iOS/macOS)  | No            | No         | Blocked by Apple |
-| Firefox             | No            | No         | Blocked by Mozilla |
+| Platform            | Web Bluetooth | Web Serial | WebSocket (TCP via bridge) | Works? |
+|---------------------|---------------|------------|----------------------------|--------|
+| Chrome Android      | Yes           | No         | Yes                        | Primary target |
+| Chrome/Edge desktop | Yes           | Yes        | Yes                        | Dev and daily use |
+| Brave desktop       | Yes           | Yes        | Yes                        | Works |
+| Safari (iOS/macOS)  | No            | No         | Yes                        | WebSocket only |
+| Firefox             | No            | No         | Yes                        | WebSocket only |
 
-Web Bluetooth requires HTTPS (or `http://localhost`). GitHub Pages and any other HTTPS host are fine.
+WebSocket works everywhere, which is the practical way to use the client from Safari, Firefox, or iOS. The LoRa-over-RNode paths require a browser that implements Web Bluetooth or Web Serial.
+
+Web Bluetooth requires HTTPS (or `http://localhost`). GitHub Pages and any other HTTPS host are fine. WebSocket from an HTTPS page must be `wss://` (see the TCP section below for the mixed-content caveat).
 
 ## Running it
 
@@ -56,22 +61,127 @@ For a public deploy, push to `gh-pages` (or any static bucket) and visit the HTT
 
 ## Using it
 
-1. **Connect.** Click `Connect (BLE)` and pick your RNode from the Bluetooth chooser, or click `Connect (Serial)` and select the USB serial port. The webapp will detect the modem, read firmware version and battery, and auto-start the radio with the values in the collapsible Radio Configuration panel.
-2. **Set your display name** and click `Send Announce`. This broadcasts your identity and destination to the mesh so other Reticulum nodes can learn how to reach you. Your LXMF address is shown under `Your Identity`.
-3. **Wait for announces.** When another node announces on the same radio parameters, it shows up in the contact list on the left.
+1. **Connect.** Click `Connect (BLE)` and pick your RNode from the Bluetooth chooser, or click `Connect (Serial)` and select the USB serial port, or click `Connect (WebSocket)` with a bridge URL to reach a remote `rnsd` (see the TCP section below). The webapp will detect the modem, read firmware version and battery, and auto-start the radio with the values in the collapsible Radio Configuration panel — or, on the WebSocket path, skip all radio config and go straight to the messaging UI.
+2. **Set your display name** and click `Send Announce`. This broadcasts your identity and destination to the network so other Reticulum nodes can learn how to reach you. Your LXMF address is shown under `Your Identity`.
+3. **Wait for announces.** When another node announces, it shows up in the contact list on the left.
 4. **Open a conversation.** Click a contact to open the conversation view, type a message, and hit Enter. Incoming messages from that contact land in the same view.
 
 Identity persists across reloads. `Export Identity` writes a JSON file containing your private keys; `New Identity` generates a fresh keypair (and will change your LXMF address).
 
+## TCP (WebSocket) connection
+
+The "Connect (WebSocket)" option lets the web client join a Reticulum network through an existing `rnsd` instead of talking to a local LoRa radio. This is how you use the client from **Safari, Firefox, or iOS** (none of which have Web Bluetooth or Web Serial), how you use it from a machine that has no RNode attached, and how you reach a wider Reticulum mesh that spans TCP, I2P, or another backbone configured on the daemon side.
+
+### Architecture
+
+Browsers cannot open raw TCP sockets — the security model only exposes HTTP, WebSocket, and WebTransport. So the web client's "TCP" option really speaks WebSocket to a small bridge script which sits in front of your `rnsd`'s TCP interface and copies bytes in both directions:
+
+```
+┌──────────────┐   WebSocket    ┌──────────────┐   TCP    ┌─────────┐   LoRa / I2P / TCP
+│  Browser     │ ◄────────────► │ ws_bridge.py │ ◄──────► │  rnsd   │ ◄─────────────────►  Reticulum network
+│  web client  │  (HDLC frames) │              │          │         │
+└──────────────┘                └──────────────┘          └─────────┘
+```
+
+- The web client builds raw Reticulum packets the same way it does for the LoRa path, but frames them in **HDLC** (`0x7E` flag, `0x7D` escape) instead of KISS before handing them to the transport.
+- `tools/ws_bridge.py` accepts WebSocket connections, opens a TCP connection to an `rnsd` running a `TCPServerInterface`, and forwards raw bytes in both directions without parsing any frames.
+- `rnsd` receives HDLC frames from the bridge exactly the way it does from any other TCP peer — the bridge is indistinguishable on the wire from a local TCP client.
+
+Identity and all protocol work stays in the browser. `rnsd` is only acting as a transport — it does not own your Reticulum identity, does not see your private keys, and does not decrypt your messages. From `rnsd`'s point of view, the browser is a peer node on its TCP interface.
+
+### Step-by-step setup
+
+**1. Install and configure `rnsd`** on the machine that will run the bridge (can be the same machine as the browser, or a server on your network).
+
+```bash
+pip install rns
+```
+
+Edit `~/.reticulum/config` (create it if it does not exist) and add a TCP server interface:
+
+```
+[[RNS TCP Server Interface]]
+    type = TCPServerInterface
+    interface_enabled = True
+    listen_ip = 0.0.0.0
+    listen_port = 4242
+```
+
+Along with whatever other interfaces you want to use as your network backbone — another `TCPClientInterface` pointing at a public RNS node, an `I2PInterface`, an `AutoInterface` for LAN discovery, a `RNodeInterface` if you have an RNode plugged in directly, etc. See [upstream Reticulum documentation](https://markqvist.github.io/Reticulum/manual/interfaces.html) for options.
+
+Start `rnsd`:
+
+```bash
+rnsd
+```
+
+Leave it running. You should see a line like `Listening for TCP connections on 0.0.0.0:4242`.
+
+**2. Install the bridge requirements** on the same machine:
+
+```bash
+pip install websockets
+```
+
+The bridge depends only on `websockets` (stdlib `asyncio` does the rest). `rns` is already installed from step 1.
+
+**3. Start the bridge** from the repo root:
+
+```bash
+python tools/ws_bridge.py
+```
+
+By default it listens on `ws://localhost:7878` and forwards to `tcp://localhost:4242`. Override with flags if your `rnsd` runs somewhere else:
+
+```bash
+python tools/ws_bridge.py --ws-host 0.0.0.0 --ws-port 7878 --rnsd-host 10.0.0.5 --rnsd-port 4242
+```
+
+You will see `[ws_bridge] listening on ws://localhost:7878` followed by `[ws_bridge] forwarding to tcp://localhost:4242`. That is the signal that the bridge is up and ready for the browser.
+
+**4. Open the web client** — either the live GitHub Pages URL or a local `python -m http.server 8000` copy — and hit **Connect (WebSocket)** with the URL field set to `ws://localhost:7878` (the default). The log panel will print `WebSocket connected` and `Connected to Reticulum network via WebSocket`, and the messaging panel will appear without any radio config step.
+
+**5. Announce yourself.** Enter a display name and click `Send Announce`. Within a second or two your announce should show up in any other Reticulum client connected to the same network — including Sideband and MeshChat if they are on the same backbone.
+
+### Mixed-content caveat
+
+If you load the web client from `https://thatsfguy.github.io/reticulum-lora-webclient/` and try to connect to `ws://localhost:7878`, the browser will refuse. Modern browsers block plain `ws://` connections from HTTPS pages as a mixed-content policy. Three ways around it:
+
+1. **Load the web client locally, not from GitHub Pages.** `python -m http.server 8000` from the repo root and open `http://localhost:8000/`. Now `ws://localhost:7878` is same-origin in terms of scheme compatibility and the browser allows it. This is the fastest way to try the TCP path.
+
+2. **Serve the bridge as `wss://` with a certificate the browser trusts.** Edit `tools/ws_bridge.py` to wrap the `websockets.serve` call in an `ssl_context`. Any cert works as long as the browser trusts it — letsencrypt, a self-signed cert you imported into the OS trust store, or a development cert from `mkcert`. Then update the URL field in the web client to `wss://your.domain:7878`.
+
+3. **Use a reverse proxy.** Run nginx or caddy in front of the bridge with a TLS cert, terminating TLS and forwarding `wss://` to the plain bridge. This is the production story for anything exposed to the internet.
+
+Option 1 is fine for one-machine testing. Option 3 is the right answer for anything you want to keep running.
+
+### Security
+
+**The browser owns your Reticulum identity.** Your Ed25519 and X25519 private keys live in IndexedDB in the browser where you are running the web client. The bridge and the `rnsd` never see them. If you expose the WebSocket bridge to the open internet without TLS, an attacker between you and the bridge can observe every encrypted Reticulum packet you send and receive, but cannot impersonate you or read your LXMF messages (both ends of the ECDH are protected inside the Reticulum protocol). That said, running plaintext WebSocket to a bridge is still a bad idea for general use; use `wss://` for anything beyond localhost.
+
+**Public-facing `rnsd` instances** that accept TCP connections should probably require IFAC (interface access codes) or be tunneled through something with authentication. The bridge is a dumb forwarder — it will happily connect any WebSocket client to the `rnsd` it is configured to talk to. If you expose the bridge publicly without locking down the `rnsd`, anyone who can reach the WebSocket port can inject packets into your Reticulum network.
+
+### Troubleshooting
+
+- **"WebSocket error before open" immediately after clicking Connect.** The bridge is not running, or is listening on a different port, or the URL in the field is wrong. Verify with `curl -v http://localhost:7878/` — a running bridge will respond with an HTTP 400 (`WebSocket Upgrade Required`), which is good.
+- **Connection opens then immediately closes, bridge logs `cannot reach rnsd`.** `rnsd` is not running, or its TCP interface is on a different port, or is bound to a different address than the bridge is trying to connect to. Check the `rnsd` logs for `Listening for TCP connections on …`.
+- **Connected but no announces appear.** `rnsd` has no upstream network interface configured (only the TCP server interface, which is how the bridge reached it). Edit `~/.reticulum/config` to add a backbone interface that actually touches other nodes.
+- **Announces appear but nobody can reach you.** Check that you have clicked `Send Announce` at least once, and that the log is showing `Periodic announce skipped` every 5 minutes without error. Relay identity caches do expire; that is why the periodic re-announce is mandatory.
+- **Works on Chrome but not Safari.** You are probably loading the live GitHub Pages URL and running into the mixed-content block. Serve the static files locally (`python -m http.server 8000`) and try again.
+
 ## Architecture
 
-The RNode is a dumb LoRa modem over KISS. All Reticulum protocol logic runs in the browser.
+All Reticulum protocol logic runs in the browser — identity, announce, encrypt/decrypt, LXMF, link handshake, retry queue, packet receipts. What changes between transports is only how the finished raw Reticulum packet gets from our browser out onto the network.
 
 ```
-Browser (Web Bluetooth / Web Serial) --> KISS --> RNode firmware --> SX126x --> LoRa RF
-                                                                                   |
-                                                         Sideband / NomadNet / MeshChat / other RNodes
+                                 ┌──► KISS ──► RNode fw ──► SX126x ──► LoRa RF   (BLE / Serial path)
+                                 │
+Browser (all protocol logic) ────┤
+                                 │
+                                 └──► HDLC ──► WebSocket ──► ws_bridge ──► rnsd ──► network  (WebSocket path)
 ```
+
+The BLE / Serial path needs an RNode and gives you direct-to-LoRa messaging with no server. The WebSocket path needs `rnsd` and a small bridge script, but runs everywhere (including Safari, Firefox, iOS) and can reach any Reticulum network `rnsd` is connected to — LoRa via a local RNode, TCP backbones to public nodes, I2P, `AutoInterface` LAN discovery, whatever you configure on the daemon side.
 
 ## Module layout
 
@@ -81,38 +191,43 @@ reticulum-lora-webclient/
   css/style.css           Dark theme
 
   js/
-    ble-transport.js      Web Bluetooth NUS byte stream
-    serial-transport.js   Web Serial byte stream
-    kiss.js               KISS frame encode/decode + parser that reassembles
-                          frames split across BLE notifications
-    rnode.js              RNode command layer (detect, configure, send/recv)
-    reticulum.js          Reticulum packet header encode/decode + constants
-    identity.js           Ed25519 + X25519 keypair, identity hash, destination hash
-    crypto.js             ECDH + HKDF + Token (AES-256-CBC + HMAC-SHA256)
-    announce.js           Build, parse, and validate Reticulum announces
-    link.js               Reticulum Link responder: LINKREQUEST validation,
-                          LRPROOF build, link_id derivation, signalling encoding,
-                          Token encrypt/decrypt over the derived link key
-    lxmf.js               LXMF message pack/unpack + signature
-    store.js              IndexedDB for identity, contacts, messages
-    app.js                UI controller and state management
+    ble-transport.js       Web Bluetooth NUS byte stream
+    serial-transport.js    Web Serial byte stream
+    websocket-transport.js WebSocket byte stream (for the TCP-via-bridge path)
+    kiss.js                KISS frame encode/decode for the RNode path
+    hdlc.js                HDLC frame encode/decode for the rnsd path
+    rnode.js               RNode command layer (detect, configure, send/recv over KISS)
+    rnsd-interface.js      Reticulum-direct interface over HDLC+WebSocket
+                           (exposes the same shape as rnode.js so app.js doesn't branch)
+    reticulum.js           Reticulum packet header encode/decode + constants
+    identity.js            Ed25519 + X25519 keypair, identity hash, destination hash
+    crypto.js              ECDH + HKDF + Token (AES-256-CBC + HMAC-SHA256)
+    announce.js            Build, parse, and validate Reticulum announces
+    link.js                Reticulum Link: responder validation, initiator handshake,
+                           LRPROOF build/verify, link_id derivation, signalling encoding,
+                           Token encrypt/decrypt over the derived link key
+    lxmf.js                LXMF message pack/unpack + signature
+    store.js               IndexedDB for identity, contacts, messages
+    app.js                 UI controller and state management
 
-  tools/                  Python RNS-based offline verifiers (see below)
-  docs/PROTOCOL_NOTES.md  Reticulum / LXMF interop findings reference
+  tools/                   Python RNS-based offline verifiers + ws_bridge.py
+  tests/                   Level-2 round-trip harness against RNS reference
+  docs/PROTOCOL_NOTES.md   Reticulum / LXMF interop findings reference
 ```
 
 Libraries (`@noble/curves` for Ed25519/X25519 and `@msgpack/msgpack` for LXMF payload serialization) are loaded from a CDN via an import map in `index.html`. Web Crypto handles AES-CBC, HMAC, HKDF, and SHA-256 natively.
 
-## Diagnostic tools
+## Diagnostic tools and bridge
 
-The `tools/` directory contains Python scripts that validate the web client's wire output against the Python RNS reference without needing any radio or browser in the loop. Each takes the JSON file produced by the `Export Identity` button as its input.
+The `tools/` directory contains Python scripts that validate the web client's wire output against the Python RNS reference, plus the WebSocket bridge used by the TCP connection option.
 
-- `tools/identity_info.py` — dumps every derivable public piece of an exported identity (enc/sig private and public bytes, identity hash, LXMF destination hash). Read-only, never touches network.
+- `tools/ws_bridge.py` — WebSocket↔TCP forwarder used by the "Connect (WebSocket)" option to reach a local or remote `rnsd`. Requires `pip install websockets`. See the **TCP (WebSocket) connection** section above for setup.
+- `tools/identity_info.py` — dumps every derivable public piece of an exported identity (enc/sig/ratchet private and public bytes, identity hash, LXMF destination hash). Read-only, never touches network.
 - `tools/verify_lrproof.py` — runs a self-test of RNS's Ed25519, X25519, and HKDF primitives, then verifies a real LRPROOF hex string (lifted from the web client log) against `Identity.validate` to prove our link-proof signatures are byte-compatible with upstream.
 - `tools/verify_announce.py` — builds an `lxmf.delivery` announce with RNS using the web client's identity and runs it through `Identity.validate_announce`, proving our announce format is acceptable to the upstream reference.
 - `tools/rns_responder.py` — runs Python RNS as a link responder against a supplied LINKREQUEST data field, captures the LRPROOF bytes RNS would emit, and prints them field by field for a byte-for-byte diff against the web client's own output.
 
-All four depend only on `rns` and `umsgpack` from pip and are safe to run against a real exported identity on the local machine.
+All depend only on `rns`, `umsgpack`, and (for the bridge) `websockets` from pip.
 
 ## Development notes
 
