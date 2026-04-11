@@ -61,7 +61,10 @@ jobs:
           with open('index.html', 'r', encoding='utf-8') as f:
               html = f.read()
           replacement = f' <a class="version-sha" href="{sha_url}" target="_blank" rel="noopener" title="Commit this build was deployed from">{sha_short}</a>'
-          new_html = html.replace('<!-- BUILD_SHA -->', replacement, 1)
+          # Replace every BUILD_SHA marker in the file so all version
+          # labels (sidebar logo + About card) are stamped, not just
+          # the first one.
+          new_html = html.replace('<!-- BUILD_SHA -->', replacement)
           if new_html == html:
               print('WARNING: <!-- BUILD_SHA --> marker not found in index.html; badge not stamped')
           with open('index.html', 'w', encoding='utf-8') as f:

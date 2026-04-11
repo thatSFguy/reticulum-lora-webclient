@@ -1722,6 +1722,27 @@ $('btn-back')?.addEventListener('click', () => {
 // Reflect display-name edits into avatars and sidebar/right panel labels.
 $('my-name')?.addEventListener('input', updateAvatars);
 
+// Mobile scroll hint: shown by CSS on narrow viewports. Dismiss on
+// first scroll (user has seen it and acted on it) or after 6 seconds
+// (they've seen it and are ignoring it). The hint element itself is
+// CSS display:none on desktop so the listeners are no-ops there.
+(function wireScrollHint() {
+  const hint = $('scroll-hint');
+  if (!hint) return;
+  let dismissed = false;
+  const dismiss = () => {
+    if (dismissed) return;
+    dismissed = true;
+    hint.classList.add('dismissed');
+    setTimeout(() => hint.remove(), 400);
+  };
+  window.addEventListener('scroll', dismiss, { once: true, passive: true });
+  // Also pick up scrolls on inner containers (message-list, nodes-list)
+  // since the outer document may not move much on mobile.
+  document.addEventListener('touchmove', dismiss, { once: true, passive: true });
+  setTimeout(dismiss, 6000);
+})();
+
 // Theme: stored choice in localStorage, 'system' follows OS preference.
 const storedTheme = localStorage.getItem(THEME_KEY) || 'system';
 applyTheme(storedTheme);

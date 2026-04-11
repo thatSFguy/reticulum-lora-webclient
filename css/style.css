@@ -218,9 +218,23 @@ a { color: var(--accent); }
 
 .logo {
   display: flex;
-  align-items: center;
+  align-items: baseline;
   gap: 9px;
   margin-bottom: 10px;
+  flex-wrap: wrap;
+  row-gap: 2px;
+}
+
+.logo-version {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  color: var(--text-muted);
+  font-weight: 400;
+  line-height: 1;
+  letter-spacing: 0.2px;
+}
+.logo-version .version-sha {
+  margin-left: 2px;
 }
 
 .logo-mark {
@@ -1299,6 +1313,44 @@ textarea:focus {
   border-radius: var(--radius-sm);
 }
 
+/* ================= Scroll hint (mobile) ================= */
+
+/* Shown at the top of the viewport on narrow screens to prompt the
+   user to scroll — on phones, the browser's URL bar takes up
+   viewport height until the user scrolls for the first time, and
+   that can push the compose box below the fold. Hidden on desktop
+   and removed by JS once the user scrolls or after a short timeout. */
+
+.scroll-hint {
+  display: none;
+  position: fixed;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 60;
+  background: var(--accent);
+  color: var(--accent-bg);
+  font-size: 11px;
+  font-weight: 500;
+  padding: 7px 12px 7px 10px;
+  border-radius: 20px;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.25);
+  align-items: center;
+  gap: 6px;
+  pointer-events: none;
+  animation: scroll-hint-bob 1.6s ease-in-out infinite;
+}
+.scroll-hint svg { width: 13px; height: 13px; flex-shrink: 0; }
+.scroll-hint.dismissed {
+  opacity: 0;
+  transition: opacity 0.3s ease;
+}
+
+@keyframes scroll-hint-bob {
+  0%, 100% { transform: translate(-50%, 0); }
+  50%      { transform: translate(-50%, 3px); }
+}
+
 /* ================= Bottom nav (mobile) ================= */
 
 .bottomnav {
@@ -1344,6 +1396,7 @@ textarea:focus {
 @media (max-width: 800px) {
   .sidebar { display: none; }
   .bottomnav { display: flex; }
+  .scroll-hint { display: inline-flex; }
   .main { padding-bottom: 56px; }
 
   .view-messages { flex-direction: column; }

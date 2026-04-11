@@ -34,6 +34,7 @@
       <div class="logo">
         <span class="logo-mark"></span>
         <span class="logo-name">Reticulum</span>
+        <span class="logo-version">v0.3.0<!-- BUILD_SHA --></span>
       </div>
       <span class="conn-pill">
         <span class="status-dot" id="conn-dot"></span>
@@ -419,6 +420,15 @@
 
     </section>
   </main>
+
+  <!-- Mobile scroll hint — shown on first paint on narrow viewports
+       to prompt the user to scroll so the browser's URL bar
+       collapses and the full layout becomes visible. Dismissed on
+       first scroll or after a few seconds. -->
+  <div id="scroll-hint" class="scroll-hint">
+    <svg viewBox="0 0 16 16"><path d="M8 2v10M4 8l4 4 4-4" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    <span>Scroll to hide browser bar</span>
+  </div>
 
   <!-- Bottom nav (mobile only) -->
   <nav class="bottomnav">
