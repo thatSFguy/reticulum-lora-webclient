@@ -13,3 +13,7 @@ __pycache__/
 *.pyc
 .venv/
 venv/
+
+# Node (for the Level-2 test harness; the browser app itself has no build step)
+node_modules/
+package-lock.json

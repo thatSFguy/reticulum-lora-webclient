@@ -56,3 +56,42 @@ jobs:
         # through RNS with the CI identity and confirms
         # Identity.validate_announce still accepts our packed form.
         run: python tools/verify_announce.py "${TMPDIR:-/tmp}/ci_identity.json" --name CIWebClient
+
+  roundtrip-js-vs-rns:
+    name: JS-vs-RNS round-trip (Level 2)
+    runs-on: ubuntu-latest
+    # Independent of the RNS self-test job: failing one does not
+    # cancel the other. That way an RNS upstream regression and a
+    # web-client regression show up as two distinct red Xs and we
+    # can tell them apart without reading logs.
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install JS dependencies
+        run: npm install
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install rns umsgpack
+
+      - name: Run tests/roundtrip.mjs end-to-end via tests/run_tests.py
+        # Boots Node, runs the harness, captures its test vectors,
+        # and validates each one against RNS's own reference
+        # implementation. Covers announces (Identity.validate_announce),
+        # opportunistic LXMF (token decrypt + Ed25519 signature),
+        # and LRPROOFs (Ed25519 signature against reconstructed
+        # signed_data). Any regression in js/identity.js,
+        # js/announce.js, js/crypto.js, js/lxmf.js, or js/link.js
+        # that changes the wire format will show up here.
+        run: python tests/run_tests.py
