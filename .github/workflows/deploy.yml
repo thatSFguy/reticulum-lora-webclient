@@ -16,9 +16,12 @@ on:
     branches: [master]
   workflow_dispatch:
 
-# Pages deployment permissions.
+# Pages deployment permissions. `contents: write` is needed so the
+# workflow can push a per-deploy tag back to origin (see the "Tag
+# this deploy" step below); without it the GITHUB_TOKEN only has
+# read access and the push would be rejected.
 permissions:
-  contents: read
+  contents: write
   pages: write
   id-token: write
 
@@ -86,3 +89,36 @@ jobs:
 
       - id: deployment
         uses: actions/deploy-pages@v4
+
+      - name: Tag this deploy
+        # Runs after a successful Pages publish, so the tag only
+        # exists for builds that actually went live. Tag format is
+        # `v{package.json version}-{short SHA}` — semver-friendly,
+        # unique per commit, and matches the short SHA users see in
+        # the version badge, so a bug report carrying that hex
+        # string resolves to a real git ref immediately.
+        #
+        # Manually re-running the workflow on the same commit
+        # (workflow_dispatch) re-uses the same tag, so the push is
+        # skipped if the tag already exists on origin.
+        #
+        # Auth: actions/checkout@v4 has already configured git with
+        # a credential helper backed by the workflow's GITHUB_TOKEN,
+        # so `git push` just works as long as contents: write is
+        # declared in permissions above.
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          SHORT_SHA=$(git rev-parse --short=7 HEAD)
+          TAG="v${VERSION}-${SHORT_SHA}"
+          echo "Proposed tag: ${TAG}"
+
+          if git ls-remote --tags origin "refs/tags/${TAG}" | grep -q "${TAG}"; then
+            echo "Tag ${TAG} already exists on origin, skipping"
+            exit 0
+          fi
+
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "${TAG}" -m "Auto-tag: deployed $(date -u +%Y-%m-%dT%H:%M:%SZ) to GitHub Pages"
+          git push origin "${TAG}"
+          echo "Pushed ${TAG}"
