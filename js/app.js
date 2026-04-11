@@ -145,7 +145,7 @@ async function initIdentity() {
 
   myDestHash = await computeDestinationHash('lxmf.delivery', myIdentity.hash);
   lxmfNameHash = await computeNameHash('lxmf.delivery');
-  $('my-address').textContent = toHex(myDestHash);
+  setMyAddress(toHex(myDestHash));
   log('info', `LXMF address: ${toHex(myDestHash)}`);
 
   // Load saved contacts. Drop every legacy record that does not have
@@ -346,7 +346,7 @@ function renderNodesList() {
   if (!list) return;
   getAllNodes().then((rows) => {
     if (!rows.length) {
-      list.innerHTML = '<div style="color: var(--muted); font-size: 13px; padding: 20px 0; text-align: center;">No non-LXMF announces yet. This panel fills up with repeater telemetry, heartbeats, and anything else on the mesh that is not an LXMF delivery destination.</div>';
+      list.innerHTML = '<div class="nodes-empty">No non-LXMF announces yet. This view fills up with repeater telemetry, heartbeats, and anything else on the mesh that is not an LXMF delivery destination.</div>';
       return;
     }
     // Newest first.
@@ -996,7 +996,7 @@ async function sendAnnounce() {
 function renderContactList() {
   const list = $('contact-list');
   if (contacts.size === 0) {
-    list.innerHTML = '<li style="color: var(--muted); font-size: 13px; cursor: default;">Listening for announces...</li>';
+    list.innerHTML = '<li class="contact-empty">Listening for announces…</li>';
     return;
   }
 
@@ -1006,8 +1006,15 @@ function renderContactList() {
     li.className = hash === activeContactHash ? 'active' : '';
 
     const unread = c.unreadCount ? ` <span class="contact-unread">${c.unreadCount}</span>` : '';
+    const initials = initialsFor(c.displayName || hash);
+    const shortHash = `${hash.substring(0, 8)}…${hash.substring(hash.length - 4)}`;
     const info = document.createElement('div');
-    info.innerHTML = `<div class="contact-name">${escapeHtml(c.displayName)}${unread}</div><div class="contact-hash">${hash.substring(0, 16)}...</div>`;
+    info.innerHTML = `
+      <div class="contact-avatar">${escapeHtml(initials)}</div>
+      <div style="flex:1; min-width:0">
+        <div class="contact-name">${escapeHtml(c.displayName || hash.substring(0, 8))}${unread}</div>
+        <div class="contact-hash">${shortHash}</div>
+      </div>`;
     info.addEventListener('click', () => selectContact(hash));
 
     const del = document.createElement('button');
@@ -1060,7 +1067,7 @@ async function renderMessages(contactHash) {
   const msgs = await getMessages(contactHash);
 
   if (msgs.length === 0) {
-    list.innerHTML = '<div style="color: var(--muted); font-size: 13px; text-align: center; padding: 40px 0;">No messages yet</div>';
+    list.innerHTML = '<div class="message-empty">No messages yet</div>';
     return;
   }
 
@@ -1131,6 +1138,97 @@ function escapeHtml(str) {
   return div.innerHTML;
 }
 
+// ---- DOM mirror helpers ---------------------------------------------
+// Several pieces of state are shown in more than one place (sidebar,
+// right panel, settings). Each helper here writes the canonical element
+// by id and then fans out to any `.js-*` mirror elements in the DOM.
+
+function initialsFor(name) {
+  if (!name) return '??';
+  const clean = String(name).trim();
+  if (!clean) return '??';
+  const parts = clean.split(/\s+/);
+  if (parts.length >= 2 && parts[0][0] && parts[1][0]) {
+    return (parts[0][0] + parts[1][0]).toUpperCase();
+  }
+  return clean.substring(0, 2).toUpperCase();
+}
+
+function setConnectionState(on, label) {
+  const dot = $('conn-dot');
+  if (dot) dot.classList.toggle('on', on);
+  const text = $('conn-text');
+  if (text) text.textContent = label;
+  document.querySelectorAll('.js-conn-dot').forEach(el => el.classList.toggle('on', on));
+  document.querySelectorAll('.js-conn-text').forEach(el => el.textContent = label);
+}
+
+function setRadioStatus(text, on) {
+  const main = $('radio-status');
+  if (main) {
+    main.textContent = text;
+    main.className = `js-radio-status ${on ? 'status-on' : 'status-muted'}`;
+  }
+  document.querySelectorAll('.js-radio-status').forEach(el => {
+    if (el === main) return;
+    el.textContent = text || '—';
+    el.classList.toggle('status-on', !!on);
+  });
+}
+
+function setMyAddress(hex) {
+  const el = $('my-address');
+  if (el) el.textContent = hex;
+  const short = hex && hex.length > 12
+    ? `${hex.substring(0, 6)}…${hex.substring(hex.length - 4)}`
+    : (hex || '—');
+  document.querySelectorAll('.js-address-short').forEach(el => { el.textContent = short; });
+  updateAvatars();
+}
+
+function updateAvatars() {
+  const name = ($('my-name')?.value || 'WebClient');
+  const initials = initialsFor(name);
+  ['my-avatar', 'my-avatar-rp'].forEach(id => {
+    const el = $(id);
+    if (el) el.textContent = initials;
+  });
+  ['my-name-display', 'my-name-display-rp'].forEach(id => {
+    const el = $(id);
+    if (el) el.textContent = name;
+  });
+}
+
+// ---- View switching --------------------------------------------------
+
+function switchView(name) {
+  document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
+  const target = document.querySelector(`.view-${name}`);
+  if (target) target.classList.add('active');
+  document.querySelectorAll('[data-view]').forEach(n => {
+    n.classList.toggle('active', n.dataset.view === name);
+  });
+}
+
+// ---- Theme -----------------------------------------------------------
+
+const THEME_KEY = 'reticulum-theme';
+
+function applyTheme(choice) {
+  const effective = choice === 'system'
+    ? (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')
+    : choice;
+  document.documentElement.dataset.theme = effective;
+  document.querySelectorAll('#theme-seg .seg-btn').forEach(b => {
+    b.classList.toggle('active', b.dataset.theme === choice);
+  });
+}
+
+function setTheme(choice) {
+  localStorage.setItem(THEME_KEY, choice);
+  applyTheme(choice);
+}
+
 // ---- Event wiring ----------------------------------------------------
 
 // Connect
@@ -1158,8 +1256,7 @@ async function connect(transportType) {
 
     await rnode.connect();
 
-    $('conn-dot').classList.add('on');
-    $('conn-text').textContent = `Connected (${transportType.toUpperCase()})`;
+    setConnectionState(true, `Connected (${transportType.toUpperCase()})`);
     $('btn-disconnect').classList.remove('hidden');
     btnBle.classList.add('hidden');
     btnSerial.classList.add('hidden');
@@ -1178,14 +1275,11 @@ async function connect(transportType) {
       const fw = await rnode.getFirmwareVersion();
       const battery = await rnode.getBattery();
       log('ok', `RNode FW ${fw?.major}.${fw?.minor}, Bat ${battery}%`);
-      $('config-panel').classList.remove('hidden');
-      $('messaging-panel').classList.remove('hidden');
       await startRadio();
     } else {
       // WebSocket path: no radio config, no detect, no battery.
       // Go straight to the "ready for messaging" state that
       // startRadio would have reached for the RNode path.
-      $('messaging-panel').classList.remove('hidden');
       log('ok', `Connected to Reticulum network via WebSocket`);
       markInterfaceReady();
     }
@@ -1205,8 +1299,7 @@ async function connect(transportType) {
 // the socket is up — there is no radio to wait for).
 function markInterfaceReady() {
   radioOn = true;
-  $('radio-status').textContent = 'Ready';
-  $('radio-status').className = 'status-on';
+  setRadioStatus('Ready', true);
   sendAnnounce().catch(e => log('info', `Startup announce skipped: ${e.message}`));
   if (announceTimer) clearInterval(announceTimer);
   announceTimer = setInterval(() => {
@@ -1229,17 +1322,14 @@ $('btn-disconnect').addEventListener('click', async () => {
   if (announceTimer) { clearInterval(announceTimer); announceTimer = null; }
   if (outboundRetryTimer) { clearInterval(outboundRetryTimer); outboundRetryTimer = null; }
   await rnode.disconnect();
-  $('conn-dot').classList.remove('on');
-  $('conn-text').textContent = 'Disconnected';
+  setConnectionState(false, 'Disconnected');
   $('btn-disconnect').classList.add('hidden');
   $('btn-connect-ble').classList.remove('hidden');
   $('btn-connect-serial').classList.remove('hidden');
   $('btn-connect-ws').classList.remove('hidden');
   $('ws-url-row').classList.remove('hidden');
-  $('config-panel').classList.add('hidden');
-  $('messaging-panel').classList.add('hidden');
   radioOn = false;
-  $('radio-status').textContent = '';
+  setRadioStatus('', false);
   log('info', 'Disconnected');
 });
 
@@ -1252,8 +1342,7 @@ async function startRadio() {
     const cr = parseInt($('cfg-cr').value);
     const txp = parseInt($('cfg-txp').value);
     const on = await rnode.configureAndStart({ freq, bw, sf, cr, txp });
-    $('radio-status').textContent = on ? 'Radio: ON' : '';
-    $('radio-status').className = on ? 'status-on' : 'status-off';
+    setRadioStatus(on ? 'Radio: ON' : '', on);
     if (on) {
       log('ok', 'Radio on');
       markInterfaceReady();
@@ -1267,8 +1356,7 @@ $('btn-start-radio').addEventListener('click', startRadio);
 $('btn-stop-radio').addEventListener('click', async () => {
   await rnode.setRadioState(false);
   radioOn = false;
-  $('radio-status').textContent = 'Radio: OFF';
-  $('radio-status').className = 'status-off';
+  setRadioStatus('Radio: OFF', false);
 });
 
 // Identity
@@ -1279,7 +1367,7 @@ $('btn-new-id').addEventListener('click', async () => {
   await myIdentity.generate();
   await saveIdentity(myIdentity.exportPrivateKeys());
   myDestHash = await computeDestinationHash('lxmf.delivery', myIdentity.hash);
-  $('my-address').textContent = toHex(myDestHash);
+  setMyAddress(toHex(myDestHash));
   log('ok', `New identity: ${toHex(myDestHash)}`);
 });
 $('btn-export-id').addEventListener('click', () => {
@@ -1331,5 +1419,39 @@ if (!navigator.bluetooth && !navigator.serial && typeof WebSocket === 'undefined
   $('unsupported').classList.remove('hidden');
 }
 
+// ---- View / theme / misc UI wiring ----------------------------------
+
+// Sidebar nav + mobile bottom-nav: both carry data-view="messages|nodes|settings"
+document.querySelectorAll('[data-view]').forEach(n => {
+  n.addEventListener('click', () => switchView(n.dataset.view));
+});
+
+// Mobile back button clears the active contact so the list re-appears.
+$('btn-back')?.addEventListener('click', () => {
+  activeContactHash = null;
+  $('conv-title').textContent = 'Select a contact';
+  $('compose-area').classList.add('hidden');
+  $('message-list').innerHTML = '';
+  renderContactList();
+});
+
+// Reflect display-name edits into avatars and sidebar/right panel labels.
+$('my-name')?.addEventListener('input', updateAvatars);
+
+// Theme: stored choice in localStorage, 'system' follows OS preference.
+const storedTheme = localStorage.getItem(THEME_KEY) || 'system';
+applyTheme(storedTheme);
+document.querySelectorAll('#theme-seg .seg-btn').forEach(b => {
+  b.addEventListener('click', () => setTheme(b.dataset.theme));
+});
+$('theme-toggle')?.addEventListener('click', () => {
+  const current = document.documentElement.dataset.theme;
+  setTheme(current === 'dark' ? 'light' : 'dark');
+});
+matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
+  if ((localStorage.getItem(THEME_KEY) || 'system') === 'system') applyTheme('system');
+});
+
 // ---- Init ------------------------------------------------------------
+updateAvatars();
 initIdentity().catch(e => log('err', 'Identity init: ' + e.message));
