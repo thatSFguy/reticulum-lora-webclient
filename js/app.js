@@ -1231,15 +1231,22 @@ function setTheme(choice) {
 
 // ---- Event wiring ----------------------------------------------------
 
+// Helpers: connect buttons live in three places (sidebar quick-connect,
+// mobile hero, settings). Toggle them all at once by class so they
+// stay in sync regardless of which one the user clicked.
+function setConnectButtonsDisabled(disabled) {
+  document.querySelectorAll('.js-connect-btn').forEach(b => { b.disabled = disabled; });
+}
+function setConnectButtonsHidden(hidden) {
+  document.querySelectorAll('.js-connect-btn').forEach(b => {
+    b.classList.toggle('hidden', hidden);
+  });
+}
+
 // Connect
 async function connect(transportType) {
-  const btnBle = $('btn-connect-ble');
-  const btnSerial = $('btn-connect-serial');
-  const btnWs = $('btn-connect-ws');
   try {
-    btnBle.disabled = true;
-    btnSerial.disabled = true;
-    btnWs.disabled = true;
+    setConnectButtonsDisabled(true);
 
     // Pick the right interface based on transport type.
     //   'ble' / 'serial' → RNode-over-KISS (owns a radio)
@@ -1258,9 +1265,7 @@ async function connect(transportType) {
 
     setConnectionState(true, `Connected (${transportType.toUpperCase()})`);
     $('btn-disconnect').classList.remove('hidden');
-    btnBle.classList.add('hidden');
-    btnSerial.classList.add('hidden');
-    btnWs.classList.add('hidden');
+    setConnectButtonsHidden(true);
     $('ws-url-row').classList.add('hidden');
 
     // Interfaces with an RNode on the other side (BLE/Serial) need
@@ -1286,9 +1291,7 @@ async function connect(transportType) {
   } catch (e) {
     log('err', 'Connect: ' + e.message);
   } finally {
-    btnBle.disabled = false;
-    btnSerial.disabled = false;
-    btnWs.disabled = false;
+    setConnectButtonsDisabled(false);
   }
 }
 
@@ -1314,9 +1317,11 @@ function markInterfaceReady() {
   outboundRetryTick().catch(e => log('info', `Retry tick error: ${e.message}`));
 }
 
-$('btn-connect-ble').addEventListener('click', () => connect('ble'));
-$('btn-connect-serial').addEventListener('click', () => connect('serial'));
-$('btn-connect-ws').addEventListener('click', () => connect('ws'));
+// Wire every connect button (sidebar quick-connect, mobile hero,
+// settings) through a single listener keyed on data-transport.
+document.querySelectorAll('.js-connect-btn').forEach(b => {
+  b.addEventListener('click', () => connect(b.dataset.transport));
+});
 
 $('btn-disconnect').addEventListener('click', async () => {
   if (announceTimer) { clearInterval(announceTimer); announceTimer = null; }
@@ -1324,9 +1329,7 @@ $('btn-disconnect').addEventListener('click', async () => {
   await rnode.disconnect();
   setConnectionState(false, 'Disconnected');
   $('btn-disconnect').classList.add('hidden');
-  $('btn-connect-ble').classList.remove('hidden');
-  $('btn-connect-serial').classList.remove('hidden');
-  $('btn-connect-ws').classList.remove('hidden');
+  setConnectButtonsHidden(false);
   $('ws-url-row').classList.remove('hidden');
   radioOn = false;
   setRadioStatus('', false);
@@ -1400,21 +1403,18 @@ $('btn-clear-nodes').addEventListener('click', async () => {
   log('info', 'Cleared all nodes');
 });
 
-// Browser check — disable buttons for unsupported transports.
-// WebSocket is available in every modern browser, so it never gets
-// disabled; BLE and Serial still depend on Web Bluetooth / Web Serial.
-if (!navigator.bluetooth) {
-  $('btn-connect-ble').disabled = true;
-  $('btn-connect-ble').textContent = 'Connect (BLE — not supported)';
+// Browser check — disable buttons for unsupported transports. Every
+// connect surface (sidebar, mobile hero, settings) is selected by
+// data-transport, so all of them get disabled together.
+function disableTransport(name, label) {
+  document.querySelectorAll(`[data-transport="${name}"]`).forEach(b => {
+    b.disabled = true;
+    if (b.id) b.textContent = label;  // only the settings button has the long label
+  });
 }
-if (!navigator.serial) {
-  $('btn-connect-serial').disabled = true;
-  $('btn-connect-serial').textContent = 'Connect (Serial — not supported)';
-}
-if (typeof WebSocket === 'undefined') {
-  $('btn-connect-ws').disabled = true;
-  $('btn-connect-ws').textContent = 'Connect (WebSocket — not supported)';
-}
+if (!navigator.bluetooth) disableTransport('ble', 'Connect (BLE — not supported)');
+if (!navigator.serial) disableTransport('serial', 'Connect (Serial — not supported)');
+if (typeof WebSocket === 'undefined') disableTransport('ws', 'Connect (WebSocket — not supported)');
 if (!navigator.bluetooth && !navigator.serial && typeof WebSocket === 'undefined') {
   $('unsupported').classList.remove('hidden');
 }

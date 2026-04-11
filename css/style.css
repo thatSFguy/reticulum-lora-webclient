@@ -130,9 +130,91 @@ a { color: var(--accent); }
 }
 
 .sidebar-header {
-  padding: 16px 14px 12px;
+  padding: 16px 14px 14px;
   border-bottom: 0.5px solid var(--border);
 }
+
+/* Quick-connect buttons in the sidebar header — shown only when
+   disconnected, hidden via the same .hidden class the settings
+   connect buttons use. First-launch users can see and hit them
+   immediately without going to Settings. */
+.quick-connect {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 12px;
+}
+.quick-connect-btn {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 8px 11px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text);
+  background: var(--surface-2);
+  border: 0.5px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  transition: background 0.1s, border-color 0.1s, color 0.1s;
+  text-align: left;
+}
+.quick-connect-btn:hover {
+  background: var(--accent);
+  color: var(--accent-bg);
+  border-color: var(--accent);
+}
+.quick-connect-btn svg {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+  color: var(--accent);
+  transition: color 0.1s;
+}
+.quick-connect-btn:hover svg { color: var(--accent-bg); }
+.quick-connect-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.quick-connect-btn:disabled:hover {
+  background: var(--surface-2);
+  color: var(--text);
+  border-color: var(--border-strong);
+}
+.quick-connect-btn:disabled:hover svg { color: var(--accent); }
+
+/* Mobile hero banner inside the Messages view, shown when disconnected.
+   Mirrors the sidebar's quick-connect purpose for devices where the
+   sidebar is hidden. */
+.mobile-connect-hero {
+  display: none;
+  padding: 16px 14px;
+  background: var(--accent-bg);
+  border-bottom: 0.5px solid var(--border);
+}
+.mobile-connect-hero .btn-primary,
+.mobile-connect-hero .btn-secondary {
+  margin-top: 8px;
+}
+.mobile-connect-label {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--accent-text-strong);
+  margin-bottom: 4px;
+}
+[data-theme="dark"] .mobile-connect-label { color: var(--accent-text); }
+.mobile-connect-hint {
+  font-size: 11px;
+  color: var(--accent-text);
+  margin-top: 10px;
+  line-height: 1.5;
+}
+.mobile-connect-hint code {
+  font-family: var(--font-mono);
+  background: rgba(255, 255, 255, 0.5);
+  padding: 1px 5px;
+  border-radius: var(--radius-sm);
+}
+[data-theme="dark"] .mobile-connect-hint code { background: rgba(0, 0, 0, 0.3); }
 
 .logo {
   display: flex;
@@ -1146,6 +1228,13 @@ textarea:focus {
   .right-panel { display: none; }
 
   .back-btn { display: flex; }
+
+  /* Mobile connect hero: only appears on mobile, and only when the
+     quick-connect buttons are still visible (i.e., nothing has hidden
+     them — we're disconnected). Uses :has() to read the same state
+     the sidebar quick-connect uses. */
+  .mobile-connect-hero:has(.js-connect-btn:not(.hidden)) { display: block; }
+  .mobile-connect-hero:has(.js-connect-btn.hidden) { display: none; }
 
   /* Use :has() to swap between list and chat on mobile.
      When a contact is selected (compose-area unhidden), show the chat
