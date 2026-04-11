@@ -326,57 +326,266 @@ async function handleNonLxmfAnnounce(announce, pkt, rssi) {
   // extractDisplayName already returns a usable string for both.
   const displayName = extractDisplayName(announce.appData) || `${nameHashHex.substring(0, 8)} / ${idHash.substring(0, 8)}`;
 
+  // Parse telemetry out of displayName so nodes that carry lat/lon
+  // in their key=value payload can be plotted on the map.
+  const telemetry = parseTelemetry(displayName);
+  const lat = telemetry ? parseFloat(telemetry.lat) : NaN;
+  const lon = telemetry ? parseFloat(telemetry.lon) : NaN;
+
   const node = {
     hash: destHashHex,
     identityHash: idHash,
     nameHash: Array.from(announce.nameHash),
     displayName,
+    telemetry: telemetry || null,
+    lat: Number.isFinite(lat) ? lat : null,
+    lon: Number.isFinite(lon) ? lon : null,
     appDataHex: toHex(announce.appData),
     lastSeen: Date.now(),
     rssi,
   };
   await saveNode(node);
 
-  log('info', `  Non-LXMF announce from ${idHash.substring(0, 12)}... → Nodes panel`);
+  log('info', `  Non-LXMF announce from ${idHash.substring(0, 12)}... → Nodes panel${node.lat != null ? ` (lat=${node.lat.toFixed(4)}, lon=${node.lon.toFixed(4)})` : ''}`);
   renderNodesList();
 }
 
-function renderNodesList() {
+// Parse a `key=value;key=value;...` telemetry string into an object.
+// Returns null for strings that are not key/value telemetry so callers
+// can fall back to a raw-label path. Tolerant of whitespace, trailing
+// semicolons, and values that contain additional `=` signs.
+function parseTelemetry(s) {
+  if (!s || typeof s !== 'string') return null;
+  if (!s.includes('=') || !s.includes(';')) {
+    // Single-pair strings like `key=value` with no semicolons still
+    // count; reject anything without an `=` outright.
+    if (!s.includes('=')) return null;
+  }
+  const out = {};
+  let hits = 0;
+  for (const pair of s.split(';')) {
+    if (!pair.trim()) continue;
+    const eq = pair.indexOf('=');
+    if (eq <= 0) continue;
+    const k = pair.substring(0, eq).trim();
+    const v = pair.substring(eq + 1).trim();
+    if (!k) continue;
+    out[k] = v;
+    hits++;
+  }
+  return hits > 0 ? out : null;
+}
+
+// Backfill telemetry/lat/lon on node rows that were saved before this
+// feature landed. Mutates and returns the row.
+function enrichNode(n) {
+  if (!n) return n;
+  if (n.telemetry || (n.lat != null && n.lon != null)) return n;
+  const tel = parseTelemetry(n.displayName);
+  if (!tel) return n;
+  n.telemetry = tel;
+  const lat = parseFloat(tel.lat);
+  const lon = parseFloat(tel.lon);
+  if (Number.isFinite(lat) && Number.isFinite(lon)) {
+    n.lat = lat;
+    n.lon = lon;
+  }
+  return n;
+}
+
+// Human-friendly one-liner for a node row. Telemetry beacons get a
+// summarised "BAT / UP / coords" header so the list stays readable;
+// non-telemetry nodes keep their raw label.
+function nodeDisplayLabel(n) {
+  if (!n.telemetry) return n.displayName || '(unknown)';
+  const bits = [];
+  if (n.telemetry.bat) {
+    const mv = parseInt(n.telemetry.bat, 10);
+    if (Number.isFinite(mv)) bits.push(`${(mv / 1000).toFixed(2)} V`);
+    else bits.push(`bat ${n.telemetry.bat}`);
+  }
+  if (n.telemetry.up) bits.push(`up ${n.telemetry.up}`);
+  if (n.lat != null && n.lon != null) {
+    bits.push(`${n.lat.toFixed(3)}, ${n.lon.toFixed(3)}`);
+  }
+  return `Telemetry · ${bits.join(' · ') || 'no fields'}`;
+}
+
+async function renderNodesList() {
   const list = $('nodes-list');
   if (!list) return;
-  getAllNodes().then((rows) => {
-    if (!rows.length) {
-      list.innerHTML = '<div class="nodes-empty">No non-LXMF announces yet. This view fills up with repeater telemetry, heartbeats, and anything else on the mesh that is not an LXMF delivery destination.</div>';
-      return;
-    }
-    // Newest first.
-    rows.sort((a, b) => (b.lastSeen || 0) - (a.lastSeen || 0));
-    list.innerHTML = '';
-    for (const n of rows) {
-      const li = document.createElement('div');
-      li.className = 'node-row';
-      const ts = n.lastSeen ? new Date(n.lastSeen).toLocaleString() : '(unknown)';
-      const rssi = (typeof n.rssi === 'number') ? `${n.rssi} dBm` : 'n/a';
-      li.innerHTML =
-        `<div class="node-row-top">
-           <div class="node-name">${escapeHtml(n.displayName || '')}</div>
-           <button class="node-delete" title="Forget this node">\u00d7</button>
-         </div>
-         <div class="node-meta">
-           <span>dest <code>${n.hash.substring(0, 16)}...</code></span>
-           <span>name_hash <code>${toHex(new Uint8Array(n.nameHash)).substring(0, 12)}...</code></span>
-           <span>RSSI ${rssi}</span>
-           <span>${ts}</span>
-         </div>`;
-      li.querySelector('.node-delete').addEventListener('click', async () => {
-        await deleteNode(n.hash);
-        renderNodesList();
-      });
-      list.appendChild(li);
-    }
-  }).catch((e) => {
+  let rows;
+  try {
+    rows = await getAllNodes();
+  } catch (e) {
     list.innerHTML = `<div class="err">Could not load nodes: ${escapeHtml(e.message)}</div>`;
-  });
+    return;
+  }
+  if (!rows.length) {
+    list.innerHTML = '<div class="nodes-empty">No non-LXMF announces yet. This view fills up with repeater telemetry, heartbeats, and anything else on the mesh that is not an LXMF delivery destination.</div>';
+    updateMapMarkers([]);
+    return;
+  }
+  // Enrich once, then sort newest-first.
+  rows.forEach(enrichNode);
+  rows.sort((a, b) => (b.lastSeen || 0) - (a.lastSeen || 0));
+  list.innerHTML = '';
+  for (const n of rows) {
+    const li = document.createElement('div');
+    li.className = 'node-row';
+    li.dataset.hash = n.hash;
+    const ts = n.lastSeen ? new Date(n.lastSeen).toLocaleString() : '(unknown)';
+    const rssi = (typeof n.rssi === 'number') ? `${n.rssi} dBm` : 'n/a';
+    const label = nodeDisplayLabel(n);
+    const hasCoords = n.lat != null && n.lon != null;
+    li.innerHTML =
+      `<div class="node-row-top">
+         <div class="node-name">${escapeHtml(label)}${hasCoords ? ' <span class="node-geo-dot" title="Has coordinates">●</span>' : ''}</div>
+         <button class="node-delete" title="Forget this node">\u00d7</button>
+       </div>
+       <div class="node-meta">
+         <span>dest <code>${n.hash.substring(0, 16)}…</code></span>
+         <span>name_hash <code>${toHex(new Uint8Array(n.nameHash)).substring(0, 12)}…</code></span>
+         <span>RSSI ${rssi}</span>
+         <span>${ts}</span>
+       </div>`;
+    li.querySelector('.node-delete').addEventListener('click', async (e) => {
+      e.stopPropagation();
+      await deleteNode(n.hash);
+      // Also drop the marker so the map stays in sync.
+      const marker = nodeMarkers.get(n.hash);
+      if (marker && nodesMap) nodesMap.removeLayer(marker);
+      nodeMarkers.delete(n.hash);
+      renderNodesList();
+    });
+    if (hasCoords) {
+      li.addEventListener('click', () => focusNodeOnMap(n.hash));
+    }
+    list.appendChild(li);
+  }
+
+  // Push the enriched rows to the map so markers follow the list.
+  updateMapMarkers(rows);
+}
+
+// ---- Nodes map (Leaflet, lazy-loaded) --------------------------------
+
+let leafletLib = null;          // cached reference to the loaded L module
+let nodesMap = null;             // L.Map instance, created on first view visit
+let nodesTileLayer = null;       // active tile layer
+let nodeMarkers = new Map();     // hash_hex → L.Marker
+
+// Dynamically import Leaflet from esm.sh on first use. On a box with
+// no internet this will reject; callers swallow that so the list still
+// works and the map container just stays as the placeholder.
+async function ensureLeaflet() {
+  if (leafletLib) return leafletLib;
+  const mod = await import('https://esm.sh/leaflet@1.9.4');
+  leafletLib = mod.default || mod;
+  return leafletLib;
+}
+
+// Create the map on the Nodes view's container the first time the
+// user opens the tab. Leaflet needs a container with a non-zero size
+// to lay out, which is why this runs after the view is activated.
+async function initNodesMap() {
+  if (nodesMap) return nodesMap;
+  const container = $('nodes-map');
+  if (!container) return null;
+  let L;
+  try {
+    L = await ensureLeaflet();
+  } catch (e) {
+    log('info', `Map unavailable (Leaflet load failed): ${e.message}`);
+    return null;
+  }
+  nodesMap = L.map(container, {
+    worldCopyJump: true,
+    zoomControl: true,
+  }).setView([20, 0], 2);
+  nodesTileLayer = L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    attribution: '© OpenStreetMap contributors',
+    maxZoom: 19,
+  }).addTo(nodesMap);
+  // Paint any existing nodes from storage into the fresh map.
+  try {
+    const rows = (await getAllNodes()).map(enrichNode);
+    updateMapMarkers(rows);
+  } catch (_) { /* empty store is fine */ }
+  return nodesMap;
+}
+
+// Sync markers with the given enriched node list. Called from
+// renderNodesList every time the list changes and from initNodesMap
+// on first creation. Safe to call when Leaflet is not yet loaded —
+// it no-ops until the map exists.
+function updateMapMarkers(rows) {
+  if (!nodesMap || !leafletLib) return;
+  const L = leafletLib;
+  const seen = new Set();
+  const pts = [];
+  for (const n of rows) {
+    if (n.lat == null || n.lon == null) continue;
+    seen.add(n.hash);
+    pts.push([n.lat, n.lon]);
+    let marker = nodeMarkers.get(n.hash);
+    if (!marker) {
+      marker = L.marker([n.lat, n.lon]).addTo(nodesMap);
+      nodeMarkers.set(n.hash, marker);
+    } else {
+      marker.setLatLng([n.lat, n.lon]);
+    }
+    marker.bindPopup(nodePopupHtml(n), { closeButton: true });
+  }
+  // Drop stale markers for nodes that disappeared.
+  for (const [hash, marker] of nodeMarkers) {
+    if (!seen.has(hash)) {
+      nodesMap.removeLayer(marker);
+      nodeMarkers.delete(hash);
+    }
+  }
+  // Auto-fit to visible markers exactly once — the first render that
+  // has at least one marker. After that we leave the viewport alone
+  // so incoming announces don't yank the user's view around every
+  // few seconds.
+  if (pts.length > 0 && !nodesMap._autoFitDone) {
+    nodesMap.fitBounds(pts, { padding: [48, 48], maxZoom: 13 });
+    nodesMap._autoFitDone = true;
+  }
+}
+
+// Popup markup for a node — reuses the same fields as the list row
+// with the full telemetry object dumped below for detail.
+function nodePopupHtml(n) {
+  const rows = [];
+  rows.push(`<div class="popup-title">${escapeHtml(nodeDisplayLabel(n))}</div>`);
+  rows.push(`<div class="popup-sub">${n.hash.substring(0, 24)}…</div>`);
+  if (n.telemetry) {
+    for (const [k, v] of Object.entries(n.telemetry)) {
+      rows.push(`<div class="popup-kv"><span class="popup-kv-key">${escapeHtml(k)}</span><span>${escapeHtml(v)}</span></div>`);
+    }
+  }
+  if (typeof n.rssi === 'number') {
+    rows.push(`<div class="popup-kv"><span class="popup-kv-key">rssi</span><span>${n.rssi} dBm</span></div>`);
+  }
+  if (n.lastSeen) {
+    const ts = new Date(n.lastSeen).toLocaleString();
+    rows.push(`<div class="popup-kv"><span class="popup-kv-key">seen</span><span>${escapeHtml(ts)}</span></div>`);
+  }
+  return rows.join('');
+}
+
+// Pan and zoom to a node, open its popup, and highlight the matching
+// list row briefly. Called when a list row is clicked.
+function focusNodeOnMap(hash) {
+  if (!nodesMap) return;
+  const marker = nodeMarkers.get(hash);
+  if (!marker) return;
+  nodesMap.setView(marker.getLatLng(), Math.max(nodesMap.getZoom(), 12), { animate: true });
+  marker.openPopup();
+  document.querySelectorAll('.node-row.highlighted').forEach(el => el.classList.remove('highlighted'));
+  const row = document.querySelector(`.node-row[data-hash="${hash}"]`);
+  if (row) row.classList.add('highlighted');
 }
 
 // ---- Data packet handling (incoming messages) -------------------------
@@ -1208,6 +1417,16 @@ function switchView(name) {
   document.querySelectorAll('[data-view]').forEach(n => {
     n.classList.toggle('active', n.dataset.view === name);
   });
+  // Leaflet needs a sized container to lay out. The first time the
+  // Nodes view is opened we create the map; on every subsequent
+  // visit we invalidate its size so it recomputes against whatever
+  // the CSS flex layout has handed it (important after a resize or
+  // an orientation change).
+  if (name === 'nodes') {
+    initNodesMap().then((map) => {
+      if (map) setTimeout(() => map.invalidateSize(), 50);
+    }).catch(() => { /* handled inside initNodesMap */ });
+  }
 }
 
 // ---- Theme -----------------------------------------------------------

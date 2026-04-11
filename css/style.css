@@ -768,14 +768,70 @@ a { color: var(--accent); }
 .view-nodes {
   flex-direction: column;
   background: var(--bg);
-  overflow-y: auto;
+  overflow: hidden;
+}
+
+.nodes-layout {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.nodes-map-wrap {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  padding: 16px 16px 16px 24px;
+}
+
+.nodes-map {
+  flex: 1;
+  border: 0.5px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--surface-hover);
+  position: relative;
+  overflow: hidden;
+  min-height: 300px;
+}
+[data-theme="dark"] .nodes-map { background: var(--surface); }
+
+.nodes-map-placeholder {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-muted);
+  font-size: 12px;
+  padding: 20px;
+  text-align: center;
+  pointer-events: none;
+}
+/* Hide the placeholder once Leaflet has taken over the container. */
+.nodes-map.leaflet-container .nodes-map-placeholder { display: none; }
+
+.nodes-sidebar {
+  width: 320px;
+  flex-shrink: 0;
+  border-left: 0.5px solid var(--border);
+  background: var(--surface);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.nodes-sidebar-header {
+  padding: 14px 18px 10px;
+  border-bottom: 0.5px solid var(--border);
 }
 
 .nodes-list {
-  padding: 16px 24px 32px;
+  padding: 14px 18px 24px;
   display: flex;
   flex-direction: column;
   gap: 10px;
+  overflow-y: auto;
+  flex: 1;
 }
 
 .nodes-empty {
@@ -784,6 +840,74 @@ a { color: var(--accent); }
   text-align: center;
   padding: 40px 20px;
   line-height: 1.6;
+}
+
+/* Leaflet popup theming — match the app's card look in both modes. */
+.leaflet-popup-content-wrapper {
+  background: var(--surface-2) !important;
+  color: var(--text) !important;
+  border-radius: var(--radius-md) !important;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.25) !important;
+}
+[data-theme="dark"] .leaflet-popup-content-wrapper { background: var(--surface) !important; }
+.leaflet-popup-tip {
+  background: var(--surface-2) !important;
+}
+[data-theme="dark"] .leaflet-popup-tip { background: var(--surface) !important; }
+.leaflet-popup-content {
+  font-family: var(--font-sans);
+  font-size: 12px;
+  margin: 10px 14px !important;
+  line-height: 1.5;
+}
+.leaflet-popup-content strong { color: var(--text); }
+.leaflet-popup-content code {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-2);
+  background: var(--surface-hover);
+  padding: 1px 5px;
+  border-radius: var(--radius-sm);
+}
+.leaflet-popup-content .popup-kv {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 2px 0;
+  font-size: 11px;
+  color: var(--text-2);
+  font-family: var(--font-mono);
+}
+.leaflet-popup-content .popup-kv-key { color: var(--text-muted); }
+.leaflet-popup-content .popup-title {
+  font-weight: 500;
+  color: var(--text);
+  font-size: 13px;
+  margin-bottom: 4px;
+}
+.leaflet-popup-content .popup-sub {
+  color: var(--text-muted);
+  font-size: 11px;
+  font-family: var(--font-mono);
+  margin-bottom: 8px;
+  word-break: break-all;
+}
+.leaflet-popup-close-button { color: var(--text-muted) !important; }
+
+/* Node rows highlight when the matching marker is active. */
+.node-row.highlighted {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+.node-row {
+  cursor: pointer;
+}
+
+.node-geo-dot {
+  color: var(--accent);
+  font-size: 10px;
+  margin-left: 6px;
+  vertical-align: middle;
 }
 
 .message-empty {
@@ -1246,6 +1370,16 @@ textarea:focus {
   .view-header { padding: 16px 18px 10px; }
   .view-settings > .settings-card,
   .view-settings > .notice { margin: 8px 16px; }
+
+  .nodes-layout { flex-direction: column; }
+  .nodes-map-wrap { padding: 12px 16px 0; }
+  .nodes-map { min-height: 260px; }
+  .nodes-sidebar {
+    width: 100%;
+    border-left: none;
+    border-top: 0.5px solid var(--border);
+    max-height: 45vh;
+  }
   .nodes-list { padding: 12px 16px 24px; }
 
   .message { max-width: 80%; }
