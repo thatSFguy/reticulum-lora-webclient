@@ -78,7 +78,7 @@ jobs:
         run: npm ci
 
       - name: Stage web assets
-        run: ./tools/stage_site.sh
+        run: bash tools/stage_site.sh
 
       - name: Sync Capacitor Android
         run: npx cap sync android

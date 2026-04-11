@@ -46,7 +46,7 @@ jobs:
         run: npm ci
 
       - name: Stage web assets
-        run: ./tools/stage_site.sh
+        run: bash tools/stage_site.sh
 
       - name: Add Capacitor Android platform
         run: npx cap add android
