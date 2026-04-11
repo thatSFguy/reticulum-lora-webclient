@@ -3,7 +3,7 @@
 'use strict';
 
 const DB_NAME = 'reticulum-webclient';
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 
 let db = null;
 
@@ -32,6 +32,15 @@ export async function openDatabase() {
         const store = db.createObjectStore('messages', { keyPath: 'id', autoIncrement: true });
         store.createIndex('contact', 'contactHash', { unique: false });
         store.createIndex('timestamp', 'timestamp', { unique: false });
+      }
+
+      // Nodes (announces from non-LXMF destinations on the same mesh:
+      // repeater telemetry, heartbeat beacons, auxiliary destinations,
+      // anything else that is not lxmf.delivery). Separate from
+      // contacts so the Messages UI stays clean, but kept so the user
+      // can see the mesh activity in the Nodes panel.
+      if (!db.objectStoreNames.contains('nodes')) {
+        const store = db.createObjectStore('nodes', { keyPath: 'hash' });
       }
     };
 
@@ -165,6 +174,49 @@ export async function getMessageById(id) {
   return new Promise((resolve, reject) => {
     req.onsuccess = () => resolve(req.result || null);
     req.onerror = () => reject(req.error);
+  });
+}
+
+// ---- Nodes (non-LXMF announces) -------------------------------------
+
+// Upsert a node row keyed by its destination hash hex.
+export async function saveNode(node) {
+  const d = await openDatabase();
+  const tx = d.transaction('nodes', 'readwrite');
+  tx.objectStore('nodes').put(node);
+  return new Promise((resolve, reject) => {
+    tx.oncomplete = resolve;
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+export async function getAllNodes() {
+  const d = await openDatabase();
+  const tx = d.transaction('nodes', 'readonly');
+  const req = tx.objectStore('nodes').getAll();
+  return new Promise((resolve, reject) => {
+    req.onsuccess = () => resolve(req.result || []);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+export async function deleteNode(hash) {
+  const d = await openDatabase();
+  const tx = d.transaction('nodes', 'readwrite');
+  tx.objectStore('nodes').delete(hash);
+  return new Promise((resolve, reject) => {
+    tx.oncomplete = resolve;
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+export async function deleteAllNodes() {
+  const d = await openDatabase();
+  const tx = d.transaction('nodes', 'readwrite');
+  tx.objectStore('nodes').clear();
+  return new Promise((resolve, reject) => {
+    tx.oncomplete = resolve;
+    tx.onerror = () => reject(tx.error);
   });
 }
 

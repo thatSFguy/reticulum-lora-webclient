@@ -21,6 +21,106 @@
   Use Chrome, Edge, or Brave on Android or desktop.
 </div>
 
+<!-- Help panel (collapsed by default) -->
+<details class="panel help-panel">
+  <summary>Help &mdash; how this works</summary>
+  <div class="help-content">
+
+    <h3>What this is</h3>
+    <p>A browser-based Reticulum messaging client. It generates your
+    cryptographic identity locally in your browser, talks to a radio or
+    daemon for transport, and exchanges end-to-end encrypted LXMF messages
+    with other Reticulum nodes (Sideband, MeshChat, NomadNet, other RNodes).
+    Nothing leaves your browser except over the transport you connect to.</p>
+
+    <h3>Three ways to connect</h3>
+    <ul>
+      <li><strong>BLE</strong> &mdash; Web Bluetooth to an RNode LoRa modem.
+        Works on Chrome, Edge, and Brave on Android or desktop.
+        Primary path for LoRa.</li>
+      <li><strong>Serial</strong> &mdash; Web Serial to a USB-connected RNode.
+        Desktop Chrome/Edge/Brave.</li>
+      <li><strong>WebSocket</strong> &mdash; connect to a local or remote
+        <code>rnsd</code> Reticulum daemon through the small Python bridge
+        in <code>tools/ws_bridge.py</code>. Works in every modern browser
+        including Safari, Firefox, and iOS. Use this when you do not have
+        an RNode plugged in or when the browser does not have Web Bluetooth.
+        See the <strong>TCP (WebSocket) connection</strong> section in the
+        README for setup.</li>
+    </ul>
+
+    <h3>Your identity</h3>
+    <p>The first time you load the page, the client generates a fresh
+    Ed25519 / X25519 identity and stores it in your browser's IndexedDB.
+    Your LXMF address (the 16-byte hash shown under <em>Your Identity</em>)
+    is derived from that identity and stays the same as long as you do not
+    click <em>New Identity</em>. The <em>Export Identity</em> button writes
+    the private keys to a JSON file so you can move the identity to a
+    different browser or back it up. Never share that file with anyone
+    you do not trust with your messages.</p>
+
+    <h3>Announcing yourself</h3>
+    <p>Clicking <em>Send Announce</em> broadcasts your identity and display
+    name to the Reticulum network. Other nodes learn how to reach you and
+    show you in their contact lists. The client also auto-announces once
+    at connect time and every five minutes after that so the network's
+    path tables stay warm. Without the periodic re-announce, some nodes
+    will silently drop link deliveries addressed to you.</p>
+
+    <h3>Contacts and Nodes</h3>
+    <p>When the client receives an announce from another LXMF delivery
+    destination, it appears in the <strong>Contacts</strong> sidebar. Click
+    a contact to open the conversation view.</p>
+    <p>Announces from non-LXMF destinations &mdash; repeater telemetry
+    beacons, heartbeats, auxiliary destinations &mdash; never appear in
+    Contacts because they are not people you can message. They show up
+    in the <strong>Nodes</strong> panel lower on the page instead, with
+    their last-seen time, RSSI, and destination hash. That gives you
+    visibility into the rest of the mesh without cluttering your
+    conversations.</p>
+
+    <h3>Sending messages and what the marks mean</h3>
+    <p>Type in the compose box and hit Enter (or click Send). A new row
+    appears in the conversation view with a small status glyph next to
+    the timestamp that updates as the send progresses:</p>
+    <ul class="state-legend">
+      <li><span class="message-state pending">&#x23F3;</span> <strong>pending</strong>
+        &mdash; the radio is off or the previous send attempt failed;
+        the retry tick will pick it up when the radio is up again.</li>
+      <li><span class="message-state sending">&#x2191;</span> <strong>sending</strong>
+        &mdash; the packet is in flight to the radio right now.</li>
+      <li><span class="message-state sent">&#x2713;</span> <strong>sent</strong>
+        &mdash; the radio has transmitted, but no delivery receipt has
+        come back from the recipient yet.</li>
+      <li><span class="message-state delivered">&#x2713;&#x2713;</span> <strong>delivered</strong>
+        &mdash; the recipient sent back a delivery proof. The message
+        was received and acknowledged.</li>
+      <li><span class="message-state failed">&#x2717;</span> <strong>failed</strong>
+        &mdash; all retries are exhausted. Hover for the last error.</li>
+    </ul>
+    <p>If a send times out waiting for a delivery proof, the retry tick
+    re-transmits it automatically with a 5s / 15s / 60s backoff (three
+    attempts total, then failed).</p>
+
+    <h3>Contact sidebar badges</h3>
+    <p>A blue number next to a contact's name is the <strong>unread
+    count</strong> for incoming messages from that contact since you last
+    opened the conversation. Click the contact to clear it. The small
+    <code>&times;</code> button on the right removes the contact from your
+    list &mdash; they will reappear automatically the next time they
+    announce, so this is really a "hide until next announce" control.</p>
+
+    <h3>Privacy</h3>
+    <p>All Reticulum protocol work &mdash; identity, ECDH, HKDF, AES-CBC,
+    HMAC, Ed25519 signing, LXMF packing &mdash; happens inside your browser.
+    The radio or daemon on the other end of the transport only sees
+    encrypted packets; it does not see your private keys and cannot decrypt
+    your messages. Message history is stored in IndexedDB, never uploaded
+    anywhere. Closing or clearing the site data wipes everything local.</p>
+
+  </div>
+</details>
+
 <!-- Connect panel -->
 <div class="panel">
   <h2>Connect</h2>
@@ -127,6 +227,18 @@
     </div>
   </div>
 </div>
+
+<!-- Nodes panel (non-LXMF announces: repeaters, telemetry, heartbeats, ...) -->
+<details class="panel">
+  <summary>Nodes &mdash; non-LXMF announces seen on the mesh</summary>
+  <div style="margin-top: 10px;">
+    <div class="row" style="margin-bottom: 10px;">
+      <span style="color: var(--muted); font-size: 12px; flex: 1;">Telemetry beacons, heartbeats, and anything else on the mesh whose <code>name_hash</code> is not <code>lxmf.delivery</code>. Shown here so the Contacts list stays clean.</span>
+      <button id="btn-clear-nodes" class="secondary">Clear all</button>
+    </div>
+    <div id="nodes-list" class="nodes-list"></div>
+  </div>
+</details>
 
 <!-- Log panel -->
 <details class="panel">

@@ -36,7 +36,7 @@ const MSG_MAX_ATTEMPTS = 3;
 // etc. After MSG_MAX_ATTEMPTS attempts the row transitions to failed.
 const MSG_BACKOFF_MS = [5000, 15000, 60000];
 const MSG_RETRY_TICK_MS = 5000;
-import { openDatabase, saveIdentity, loadIdentity, saveContact, getContact, getAllContacts, deleteContact, deleteMessagesForContact, saveMessage, getMessages, getAllMessages, getMessageById, updateMessage } from './store.js';
+import { openDatabase, saveIdentity, loadIdentity, saveContact, getContact, getAllContacts, deleteContact, deleteMessagesForContact, saveMessage, getMessages, getAllMessages, getMessageById, updateMessage, saveNode, getAllNodes, deleteNode, deleteAllNodes } from './store.js';
 
 const $ = id => document.getElementById(id);
 
@@ -185,6 +185,7 @@ async function initIdentity() {
     log('info', `Removed ${purged} legacy contact${purged === 1 ? '' : 's'} (no verifiable name_hash); valid LXMF peers will return on their next announce`);
   }
   renderContactList();
+  renderNodesList();
 }
 
 // ---- Packet handling -------------------------------------------------
@@ -253,8 +254,10 @@ async function handleAnnounce(pkt, rssi) {
   // telemetry beacons (rlr.telemetry), heartbeat destinations, and any
   // other non-LXMF destination produce signed-and-valid announces with
   // a different name_hash and previously polluted the contact list.
+  // We still save them to the nodes store so the Nodes panel can show
+  // what else is active on the mesh.
   if (!arraysEqual(announce.nameHash, lxmfNameHash)) {
-    log('info', `  Non-LXMF announce (name_hash=${toHex(announce.nameHash)}) from ${idHash.substring(0, 12)}..., ignoring`);
+    await handleNonLxmfAnnounce(announce, pkt, rssi);
     return;
   }
 
@@ -298,6 +301,82 @@ async function handleAnnounce(pkt, rssi) {
 
   await saveContact(contact);
   renderContactList();
+}
+
+// ---- Non-LXMF announce handling (Nodes panel) ------------------------
+
+// Repeater telemetry beacons, heartbeats, auxiliary destinations, and
+// anything else on the mesh that is NOT lxmf.delivery. We keep these
+// out of the Messages contact list but track them in a separate store
+// so the Nodes panel can show what else is active.
+async function handleNonLxmfAnnounce(announce, pkt, rssi) {
+  const idHash = toHex(announce.identityHash);
+
+  // Skip our own echoed announces — noisy and never useful.
+  if (myIdentity && idHash === toHex(myIdentity.hash)) return;
+
+  const destHashBytes = announce.destHash || pkt.destHash;
+  const destHashHex = toHex(destHashBytes);
+  const nameHashHex = toHex(announce.nameHash);
+
+  // Try to decode the app_data for display. For rlr.telemetry these
+  // are semicolon-delimited key=value strings like
+  //   bat=3952;up=30;hpf=90720;...;lat=43.16;lon=-85.65;msl=280
+  // For heartbeats or other destinations we may just get a name.
+  // extractDisplayName already returns a usable string for both.
+  const displayName = extractDisplayName(announce.appData) || `${nameHashHex.substring(0, 8)} / ${idHash.substring(0, 8)}`;
+
+  const node = {
+    hash: destHashHex,
+    identityHash: idHash,
+    nameHash: Array.from(announce.nameHash),
+    displayName,
+    appDataHex: toHex(announce.appData),
+    lastSeen: Date.now(),
+    rssi,
+  };
+  await saveNode(node);
+
+  log('info', `  Non-LXMF announce from ${idHash.substring(0, 12)}... → Nodes panel`);
+  renderNodesList();
+}
+
+function renderNodesList() {
+  const list = $('nodes-list');
+  if (!list) return;
+  getAllNodes().then((rows) => {
+    if (!rows.length) {
+      list.innerHTML = '<div style="color: var(--muted); font-size: 13px; padding: 20px 0; text-align: center;">No non-LXMF announces yet. This panel fills up with repeater telemetry, heartbeats, and anything else on the mesh that is not an LXMF delivery destination.</div>';
+      return;
+    }
+    // Newest first.
+    rows.sort((a, b) => (b.lastSeen || 0) - (a.lastSeen || 0));
+    list.innerHTML = '';
+    for (const n of rows) {
+      const li = document.createElement('div');
+      li.className = 'node-row';
+      const ts = n.lastSeen ? new Date(n.lastSeen).toLocaleString() : '(unknown)';
+      const rssi = (typeof n.rssi === 'number') ? `${n.rssi} dBm` : 'n/a';
+      li.innerHTML =
+        `<div class="node-row-top">
+           <div class="node-name">${escapeHtml(n.displayName || '')}</div>
+           <button class="node-delete" title="Forget this node">\u00d7</button>
+         </div>
+         <div class="node-meta">
+           <span>dest <code>${n.hash.substring(0, 16)}...</code></span>
+           <span>name_hash <code>${toHex(new Uint8Array(n.nameHash)).substring(0, 12)}...</code></span>
+           <span>RSSI ${rssi}</span>
+           <span>${ts}</span>
+         </div>`;
+      li.querySelector('.node-delete').addEventListener('click', async () => {
+        await deleteNode(n.hash);
+        renderNodesList();
+      });
+      list.appendChild(li);
+    }
+  }).catch((e) => {
+    list.innerHTML = `<div class="err">Could not load nodes: ${escapeHtml(e.message)}</div>`;
+  });
 }
 
 // ---- Data packet handling (incoming messages) -------------------------
@@ -1223,6 +1302,15 @@ $('msg-content').addEventListener('keydown', (e) => {
 
 // Log
 $('btn-clear-log').addEventListener('click', () => { $('log').innerHTML = ''; });
+
+// Nodes panel — clear all forgets every stored non-LXMF announce.
+// Fresh announces repopulate the list automatically.
+$('btn-clear-nodes').addEventListener('click', async () => {
+  if (!confirm('Forget all stored non-LXMF node announces?')) return;
+  await deleteAllNodes();
+  renderNodesList();
+  log('info', 'Cleared all nodes');
+});
 
 // Browser check — disable buttons for unsupported transports.
 // WebSocket is available in every modern browser, so it never gets

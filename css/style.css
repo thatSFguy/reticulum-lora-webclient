@@ -72,6 +72,59 @@ a { color: var(--accent); }
   font-size: 11px; line-height: 16px; text-align: center; font-weight: 600;
 }
 
+/* Help panel */
+.help-panel > summary {
+  cursor: pointer; color: var(--accent); font-size: 14px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 0.5px;
+}
+.help-content { margin-top: 14px; color: var(--text); font-size: 13px; line-height: 1.55; }
+.help-content h3 {
+  color: var(--accent); font-size: 13px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 0.4px;
+  margin: 18px 0 6px 0;
+}
+.help-content h3:first-of-type { margin-top: 4px; }
+.help-content p  { margin: 6px 0 10px 0; color: var(--text); }
+.help-content ul { margin: 6px 0 10px 0; padding-left: 22px; }
+.help-content ul li { margin: 4px 0; }
+.help-content code {
+  font-family: var(--mono); font-size: 12px;
+  background: var(--panel-2); padding: 1px 5px; border-radius: 3px;
+  color: var(--text);
+}
+.help-content .state-legend { list-style: none; padding-left: 0; }
+.help-content .state-legend li {
+  padding: 4px 0;
+}
+.help-content .state-legend .message-state {
+  display: inline-block; width: 24px; text-align: center;
+}
+
+/* Nodes panel */
+.nodes-list { display: flex; flex-direction: column; gap: 8px; }
+.node-row {
+  background: var(--panel-2); border: 1px solid var(--border); border-radius: 6px;
+  padding: 10px 12px;
+}
+.node-row-top {
+  display: flex; justify-content: space-between; align-items: center; gap: 8px;
+}
+.node-name {
+  font-size: 13px; color: var(--text); font-weight: 500;
+  word-break: break-word; flex: 1; min-width: 0;
+}
+.node-meta {
+  margin-top: 6px; font-size: 11px; color: var(--muted);
+  display: flex; flex-wrap: wrap; gap: 12px;
+}
+.node-meta code { font-family: var(--mono); color: var(--muted); }
+.node-delete {
+  background: transparent; border: 1px solid var(--border); color: var(--muted);
+  width: 22px; height: 22px; padding: 0; border-radius: 4px;
+  font-size: 16px; line-height: 1; cursor: pointer; flex-shrink: 0;
+}
+.node-delete:hover { background: #5a2027; border-color: #8a3039; color: #ffb8b8; }
+
 /* Messages */
 .message-list { max-height: 400px; overflow-y: auto; padding: 10px 0; }
 .message {
