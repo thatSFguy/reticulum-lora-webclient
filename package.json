@@ -5,10 +5,15 @@
   "type": "module",
   "private": true,
   "scripts": {
-    "test": "node tests/roundtrip.mjs && python tests/run_tests.py"
+    "test": "node tests/roundtrip.mjs && python tests/run_tests.py",
+    "stage": "bash tools/stage_site.sh",
+    "cap:sync": "npm run stage && cap sync android"
   },
   "devDependencies": {
     "@noble/curves": "1.8.1",
-    "@msgpack/msgpack": "3.0.0-beta2"
+    "@msgpack/msgpack": "3.0.0-beta2",
+    "@capacitor/cli": "^6.1.2",
+    "@capacitor/core": "^6.1.2",
+    "@capacitor/android": "^6.1.2"
   }
 }

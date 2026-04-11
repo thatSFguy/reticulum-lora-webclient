@@ -14,6 +14,25 @@ __pycache__/
 .venv/
 venv/
 
-# Node (for the Level-2 test harness; the browser app itself has no build step)
+# Node
 node_modules/
-package-lock.json
+
+# Capacitor staging directory — rebuilt from index.html/css/js by
+# tools/stage_site.sh every time the Android workflow runs.
+www/
+
+# Android signing key — must NEVER be committed. The signing keystore
+# lives as a base64-encoded GitHub Actions secret, never on disk
+# inside the repo.
+*.keystore
+*.keystore.b64
+release.keystore*
+
+# Capacitor generated intermediate artefacts. The android/ directory
+# itself IS committed (generated once by the bootstrap workflow and
+# then hand-edited for signing config + BLE permissions), but local
+# gradle build output and emulator caches are not.
+android/.gradle/
+android/app/build/
+android/build/
+android/local.properties

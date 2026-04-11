@@ -1,0 +1,144 @@
+name: bootstrap-android
+
+# One-time workflow. Generates the Capacitor android/ project, patches
+# its build.gradle for env-driven signing, patches its AndroidManifest
+# for BLE permissions, and commits the result back to master. Runs
+# ONLY on manual workflow_dispatch — never on push — because the
+# commit it creates would otherwise trigger itself in a loop.
+#
+# After this has succeeded once you should never need to run it again.
+# The android/ directory lives in the repo afterwards and is built by
+# the build-apk.yml workflow on every android-v* tag.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  bootstrap:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Abort if android/ already exists
+        run: |
+          if [ -d android ]; then
+            echo "android/ already exists — refusing to re-bootstrap."
+            echo "Delete the android/ directory on a branch if you really"
+            echo "mean to regenerate it, then re-run this workflow."
+            exit 1
+          fi
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - uses: android-actions/setup-android@v3
+
+      - name: Install JS deps
+        run: npm ci
+
+      - name: Stage web assets
+        run: ./tools/stage_site.sh
+
+      - name: Add Capacitor Android platform
+        run: npx cap add android
+
+      - name: Patch build.gradle for env-driven signing
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          path = Path("android/app/build.gradle")
+          gradle = path.read_text()
+
+          # Insert a signingConfigs block right after the opening of
+          # `android {` — Capacitor's default build.gradle does not
+          # include one, so the release build would otherwise be
+          # unsigned.
+          signing_block = '''
+              signingConfigs {
+                  release {
+                      def ksPath = System.getenv("ANDROID_KEYSTORE_PATH")
+                      if (ksPath != null && file(ksPath).exists()) {
+                          storeFile     file(ksPath)
+                          storePassword System.getenv("ANDROID_KEYSTORE_PASSWORD")
+                          keyAlias      System.getenv("ANDROID_KEY_ALIAS")
+                          keyPassword   System.getenv("ANDROID_KEY_PASSWORD")
+                      }
+                  }
+              }
+          '''
+          marker = "android {\n"
+          if marker not in gradle:
+              raise SystemExit("could not find 'android {' block in build.gradle")
+          gradle = gradle.replace(marker, marker + signing_block, 1)
+
+          # Wire the release buildType to use it. Capacitor's default
+          # release {} block only has minifyEnabled + proguardFiles.
+          release_marker = "        release {\n"
+          if release_marker not in gradle:
+              raise SystemExit("could not find 'release {' block in buildTypes")
+          gradle = gradle.replace(
+              release_marker,
+              release_marker + "            signingConfig signingConfigs.release\n",
+              1,
+          )
+
+          path.write_text(gradle)
+          print("Patched build.gradle with signingConfigs.release")
+          PY
+
+      - name: Patch AndroidManifest.xml for BLE permissions
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          path = Path("android/app/src/main/AndroidManifest.xml")
+          xml = path.read_text()
+
+          # Required for Web Bluetooth inside the WebView on Android 12+.
+          # neverForLocation tells Android we will not use BLE scan
+          # results to derive physical location, which is true.
+          perms = (
+              '    <uses-permission android:name="android.permission.BLUETOOTH_SCAN"\n'
+              '                     android:usesPermissionFlags="neverForLocation" />\n'
+              '    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />\n'
+              '    <uses-feature android:name="android.hardware.bluetooth_le" android:required="true" />\n'
+          )
+
+          # Drop them immediately after the opening <manifest ...> tag.
+          # Capacitor's default already includes <uses-permission
+          # android:name="android.permission.INTERNET" /> further down,
+          # so we are only adding the three BLE ones.
+          idx = xml.find(">", xml.find("<manifest")) + 1
+          if idx < 1 or "BLUETOOTH_SCAN" in xml:
+              print("manifest already patched, skipping")
+          else:
+              xml = xml[:idx] + "\n" + perms + xml[idx:]
+              path.write_text(xml)
+              print("Added BLUETOOTH_SCAN / BLUETOOTH_CONNECT / bluetooth_le feature to manifest")
+          PY
+
+      - name: Show diff of generated android/ tree
+        run: |
+          echo "Files under android/:"
+          find android -type f | head -60
+          echo "..."
+          echo "Patched build.gradle:"
+          sed -n '1,60p' android/app/build.gradle
+          echo "Patched AndroidManifest.xml:"
+          head -30 android/app/src/main/AndroidManifest.xml
+
+      - name: Commit android/ back to master
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add android/
+          git commit -m "Bootstrap Android: generated Capacitor project + BLE permissions + signing config"
+          git push origin HEAD:master
