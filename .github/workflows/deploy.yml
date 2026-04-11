@@ -1,0 +1,88 @@
+name: deploy
+
+# Build and publish the static web client to GitHub Pages, stamping
+# the commit SHA into the version badge as part of the build so every
+# deployed page carries a clickable link to the exact commit it came
+# from.
+#
+# REQUIRED ONE-TIME REPO SETTING: Settings → Pages → Build and
+# deployment → Source must be set to "GitHub Actions". With the
+# legacy "Deploy from a branch" source selected, the auto-managed
+# pages-build-deployment workflow keeps running instead of this one
+# and no SHA stamping happens.
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+# Pages deployment permissions.
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Only one concurrent Pages deploy at a time, but do not cancel in
+# flight — if two pushes land in quick succession we want both to
+# deploy sequentially, not race.
+concurrency:
+  group: "pages"
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Inject short commit SHA into version badge
+        # Replaces the <!-- BUILD_SHA --> comment placeholder in the
+        # version badge with a clickable link to the commit. Locally
+        # the comment is invisible so the badge shows just the
+        # semantic version; deployed builds gain " · abc1234" that
+        # opens the commit on GitHub.
+        env:
+          SHA_FULL: ${{ github.sha }}
+          REPO:     ${{ github.repository }}
+        run: |
+          python - <<'PY'
+          import os
+          sha_full  = os.environ['SHA_FULL']
+          repo      = os.environ['REPO']
+          sha_short = sha_full[:7]
+          sha_url   = f"https://github.com/{repo}/commit/{sha_full}"
+          print(f"Stamping {sha_short} -> {sha_url}")
+          with open('index.html', 'r', encoding='utf-8') as f:
+              html = f.read()
+          replacement = f' <a class="version-sha" href="{sha_url}" target="_blank" rel="noopener" title="Commit this build was deployed from">{sha_short}</a>'
+          new_html = html.replace('<!-- BUILD_SHA -->', replacement, 1)
+          if new_html == html:
+              print('WARNING: <!-- BUILD_SHA --> marker not found in index.html; badge not stamped')
+          with open('index.html', 'w', encoding='utf-8') as f:
+              f.write(new_html)
+          PY
+
+      - name: Stage static site
+        # Copy only the files the browser actually needs. Leaves tests/,
+        # tools/, docs/, .github/, package.json, node_modules/, etc.
+        # out of the Pages artifact so the public deploy is not bloated
+        # with Python scripts and CI config.
+        run: |
+          mkdir -p _site
+          cp index.html _site/
+          cp -r css js _site/
+          # .nojekyll disables Jekyll processing so GitHub Pages serves
+          # files with underscores and other Jekyll-hostile names.
+          touch _site/.nojekyll
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+      - id: deployment
+        uses: actions/deploy-pages@v4
