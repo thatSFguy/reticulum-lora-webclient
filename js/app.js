@@ -102,7 +102,8 @@ let myDestHash = null;     // Our LXMF destination hash (16 bytes)
 let contacts = new Map();  // hash_hex → { hash, publicKey, displayName, destHash, identity }
 let activeContactHash = null;
 let radioOn = false;
-let links = new Map();     // hex link_id → Link instance (incoming links only)
+let links = new Map();     // hex link_id → Link instance (responder / incoming)
+let initiatorLinks = new Map();  // hex link_id → { link, contact, resolve, reject, timer }
 let lxmfNameHash = null;   // SHA256("lxmf.delivery")[:10], cached
 let announceTimer = null;  // setInterval handle for the periodic announce
 let outboundRetryTimer = null;  // setInterval handle for the outbound retry tick
@@ -212,15 +213,21 @@ async function onPacket(data, rssi, snr) {
       log('info', `  LINKREQUEST dest=${toHex(pkt.destHash).substring(0,16)}... (not for us)`);
     }
   } else if (pkt.packetType === PACKET_PROOF) {
-    // Two kinds of PROOFs we actually care about:
-    //   1. Delivery receipts for our outbound opportunistic
-    //      messages. These are addressed to the truncated hash of
-    //      the original packet, so the dest slot in the header is
-    //      the key to look up against our saved outgoing rows.
-    //   2. LRPROOFs on the mesh (context=0xFF). These are responses
-    //      to link requests we never sent, since we are responder-
-    //      only, so they are not ours to process.
-    if (pkt.context !== CTX_LRPROOF) {
+    // PROOF types we care about, in order of specificity:
+    //   1. LRPROOF (context=0xFF) addressed to one of our pending
+    //      initiator links — route to that link's validateProof().
+    //   2. PROOF with dest_type=LINK and context=CTX_NONE addressed
+    //      to an active initiator link — this is a per-packet
+    //      delivery receipt for a message we sent on that link.
+    //      The packet hash sits in data[0:32], not the dest slot.
+    //   3. Opportunistic delivery PROOF: dest_type=SINGLE (or PLAIN),
+    //      dest_hash is the truncated packet hash of the sent packet.
+    //      Matched by handleDeliveryProof against saved outgoing rows.
+    if (pkt.context === CTX_LRPROOF) {
+      await handleInitiatorLinkProof(pkt);
+    } else if (pkt.destType === DEST_LINK) {
+      await handleLinkDeliveryProof(pkt);
+    } else {
       await handleDeliveryProof(pkt);
     }
   }
@@ -509,6 +516,168 @@ async function handleLinkData(pkt, rssi) {
     }
   } catch (e) {
     log('err', `  Link packet handling failed (ctx=0x${pkt.context.toString(16)}): ${e.message}`);
+  }
+}
+
+// ---- Initiator-side link establishment ------------------------------
+
+// Open an outbound Link to the given contact. Returns a Promise that
+// resolves to the active Link once the LRPROOF has verified and the
+// LRRTT has been emitted, or rejects with an Error on timeout or
+// signature failure. The caller then uses link.encrypt to wrap
+// payloads and routes them through sendViaLink.
+async function openLinkToContact(contact, timeoutMs = 15000) {
+  if (!radioOn) throw new Error('Radio not on');
+  if (!contact || !contact.identity || !contact.identity.sigPubKey) {
+    throw new Error('Contact has no known sig pub; need an announce first');
+  }
+
+  const { link, requestData } = Link.createInitiator(
+    contact.identity.sigPubKey,
+    contact.destHash,
+  );
+
+  const lrPacket = buildPacket({
+    headerType: HEADER_1,
+    destType:   DEST_SINGLE,
+    packetType: PACKET_LINKREQ,
+    destHash:   contact.destHash,
+    context:    CTX_NONE,
+    payload:    requestData,
+  });
+
+  // link_id is derived from the packed LINKREQUEST packet, so it
+  // must be computed AFTER buildPacket. Feed the parsed version back
+  // through computeLinkId so the bytes match exactly what the
+  // responder will compute on its end.
+  const parsedLR = parsePacket(lrPacket);
+  await link.setLinkIdFromPacket(parsedLR);
+  const linkIdHex = toHex(link.linkId);
+
+  let resolve, reject;
+  const promise = new Promise((res, rej) => { resolve = res; reject = rej; });
+
+  const entry = {
+    link,
+    contact,
+    resolve,
+    reject,
+    timer: setTimeout(() => {
+      if (initiatorLinks.has(linkIdHex)) {
+        initiatorLinks.delete(linkIdHex);
+        log('err', `Link to "${contact.displayName}" timed out after ${timeoutMs}ms`);
+        reject(new Error('Link establishment timeout'));
+      }
+    }, timeoutMs),
+  };
+  initiatorLinks.set(linkIdHex, entry);
+
+  log('info', `Opening link to "${contact.displayName}" (link_id=${linkIdHex.substring(0,12)}...)`);
+  try {
+    await rnode.sendPacket(lrPacket);
+  } catch (e) {
+    clearTimeout(entry.timer);
+    initiatorLinks.delete(linkIdHex);
+    reject(e);
+  }
+
+  return promise;
+}
+
+// Handle an inbound LRPROOF that might belong to one of our pending
+// initiator links. If the dest_hash matches an entry in our map,
+// verify the proof and on success emit the LRRTT packet to transition
+// the responder to ACTIVE on its side, then resolve the caller's
+// promise with the active link.
+async function handleInitiatorLinkProof(pkt) {
+  const linkIdHex = toHex(pkt.destHash);
+  const entry = initiatorLinks.get(linkIdHex);
+  if (!entry) {
+    // Not one of ours (responder-side LRPROOF addressed to someone
+    // else's link, or an LRPROOF for a link we already torn down).
+    return;
+  }
+
+  const result = await entry.link.validateProof(pkt);
+  if (!result.ok) {
+    log('err', `  LRPROOF rejected on link ${linkIdHex.substring(0,12)}...: ${result.reason}`);
+    clearTimeout(entry.timer);
+    initiatorLinks.delete(linkIdHex);
+    entry.reject(new Error(result.reason));
+    return;
+  }
+
+  log('ok', `  Link ${linkIdHex.substring(0,12)}... ACTIVE (rtt=${result.rtt.toFixed(3)}s)`);
+
+  // Send the LRRTT packet back so the responder transitions its side
+  // to ACTIVE. This is a DATA packet with context=LRRTT addressed to
+  // the link_id, carrying the Token-encrypted msgpack of the rtt.
+  const rttPacket = buildPacket({
+    headerType: HEADER_1,
+    destType:   DEST_LINK,
+    packetType: PACKET_DATA,
+    destHash:   entry.link.linkId,
+    context:    CTX_LRRTT,
+    payload:    result.rttData,
+  });
+  try {
+    await rnode.sendPacket(rttPacket);
+  } catch (e) {
+    log('err', `  LRRTT send failed: ${e.message}`);
+  }
+
+  clearTimeout(entry.timer);
+  initiatorLinks.delete(linkIdHex);
+  // Keep the link itself reachable so sendViaLink can find it by id.
+  links.set(linkIdHex, entry.link);
+
+  entry.resolve(entry.link);
+}
+
+// Send a pre-packed LXMF container over an already-ACTIVE link.
+// Returns the truncated packet hash suitable for matching a later
+// delivery PROOF so the caller can update the outgoing message row.
+async function sendViaLink(link, packedLxmf) {
+  const encrypted = await link.encrypt(packedLxmf);
+  const dataPacket = buildPacket({
+    headerType: HEADER_1,
+    destType:   DEST_LINK,
+    packetType: PACKET_DATA,
+    destHash:   link.linkId,
+    context:    CTX_NONE,
+    payload:    encrypted,
+  });
+  await rnode.sendPacket(dataPacket);
+
+  // Compute the full 32-byte packet hash of what we just sent so a
+  // subsequent link-delivery PROOF (which carries the packet hash
+  // in its data, not in its dest slot) can be matched back to this
+  // send. Truncated to 16 bytes because that's what our existing
+  // outbound row stores for opportunistic matching.
+  const parsed = parsePacket(dataPacket);
+  const fullHash = await computePacketFullHash(parsed);
+  return { packet: dataPacket, packetHash: fullHash };
+}
+
+// Match a link-delivered delivery PROOF back to an outbound row. The
+// proof's dest_hash is the link_id, and data[0:32] is the original
+// packet's full 32-byte hash. We store only the first 16 bytes on
+// the row, so match on the prefix.
+async function handleLinkDeliveryProof(pkt) {
+  if (pkt.payload.length < 32) return;
+  const packetHashPrefixHex = toHex(pkt.payload.subarray(0, 16));
+  const rows = await getAllMessages();
+  for (const row of rows) {
+    if (row.direction !== 'outgoing') continue;
+    if (row.packetHash !== packetHashPrefixHex) continue;
+    if (row.state === MSG_STATE_DELIVERED) return;
+    await updateMessage(row.id, { state: MSG_STATE_DELIVERED });
+    const preview = (row.content || '').substring(0, 24);
+    log('ok', `  Link delivery proof matched outbound "${preview}"`);
+    if (activeContactHash === row.contactHash) {
+      await renderMessages(activeContactHash);
+    }
+    return;
   }
 }
 

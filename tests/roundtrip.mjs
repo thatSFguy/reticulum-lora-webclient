@@ -157,6 +157,77 @@ async function main() {
     payload: link.cachedProofData,
   });
 
+  // ---- Scenario D: full Alice-initiates-link-to-Bob 4-way handshake -------
+  // Alice is the initiator. She creates a Link targeting Bob's destination
+  // using Bob's long-term Ed25519 sig pub (which she would have learned from
+  // his earlier announce) and his destination hash. She packs a LINKREQUEST,
+  // Bob runs it through Link.validateRequest (responder path, already tested),
+  // Alice runs the resulting LRPROOF through link.validateProof, both sides
+  // go ACTIVE, Alice encrypts a test payload with the link session key, and
+  // Bob decrypts it with the same key. If any byte of the handshake drifts
+  // this scenario fails.
+  const { link: aliceInitiator, requestData: aliceLrData } = Link.createInitiator(
+    bob.sigPubKey,
+    bobDestHash,
+  );
+  const aliceLrPacket = buildPacket({
+    headerType: HEADER_1,
+    destType:   DEST_SINGLE,
+    packetType: PACKET_LINKREQ,
+    destHash:   bobDestHash,
+    context:    0x00,
+    payload:    aliceLrData,
+  });
+  const aliceLrParsed = parsePacket(aliceLrPacket);
+  await aliceInitiator.setLinkIdFromPacket(aliceLrParsed);
+
+  // Bob (responder) validates Alice's LINKREQUEST.
+  const { link: bobResponder, proofData: bobProofData } =
+    await Link.validateRequest(aliceLrParsed, bob);
+
+  // link_id must match on both sides or the whole handshake is wrong.
+  if (toHex(bobResponder.linkId) !== toHex(aliceInitiator.linkId)) {
+    throw new Error(
+      `initiator/responder link_id mismatch: alice=${toHex(aliceInitiator.linkId)} bob=${toHex(bobResponder.linkId)}`
+    );
+  }
+
+  // Bob packs the LRPROOF packet the same way the web client does.
+  const bobLrProofPacket = buildPacket({
+    headerType: HEADER_1,
+    destType:   DEST_LINK,
+    packetType: PACKET_PROOF,
+    destHash:   bobResponder.linkId,
+    context:    0xff,
+    payload:    bobProofData,
+  });
+
+  // Alice validates the LRPROOF on her pending initiator link.
+  const aliceProofParsed = parsePacket(bobLrProofPacket);
+  const lrProofResult = await aliceInitiator.validateProof(aliceProofParsed);
+  if (!lrProofResult.ok) {
+    throw new Error(`initiator validateProof failed: ${lrProofResult.reason}`);
+  }
+
+  // Alice and Bob must now agree on the derived key. If they don't, the
+  // decrypt step below will fail the HMAC verify.
+  if (toHex(aliceInitiator.derivedKey) !== toHex(bobResponder.derivedKey)) {
+    throw new Error(
+      `derivedKey mismatch after handshake: alice[:16]=${toHex(aliceInitiator.derivedKey.subarray(0, 16))} bob[:16]=${toHex(bobResponder.derivedKey.subarray(0, 16))}`
+    );
+  }
+
+  // Alice encrypts a small payload and Bob decrypts it.
+  const linkTestPlaintext = new TextEncoder().encode("hi over link from alice");
+  const linkCiphertext = await aliceInitiator.encrypt(linkTestPlaintext);
+  const linkDecrypted = await bobResponder.decrypt(linkCiphertext);
+  const linkDecryptedStr = new TextDecoder().decode(linkDecrypted);
+  if (linkDecryptedStr !== "hi over link from alice") {
+    throw new Error(
+      `link encrypt/decrypt round-trip failed: got ${JSON.stringify(linkDecryptedStr)}`
+    );
+  }
+
   // ---- Emit a JSON document describing everything the Python runner needs -
   const out = {
     version: 1,
@@ -178,6 +249,16 @@ async function main() {
       linkId: toHex(link.linkId),
       lrProofPacket: toHex(lrProofPacket),
       signedData: toHex(link.signedData),
+    },
+    link_handshake: {
+      linkIdInitiator: toHex(aliceInitiator.linkId),
+      linkIdResponder: toHex(bobResponder.linkId),
+      derivedKey: toHex(aliceInitiator.derivedKey),
+      rttSeconds: aliceInitiator.rtt,
+      linkReqPacket: toHex(aliceLrPacket),
+      lrProofPacket: toHex(bobLrProofPacket),
+      testCiphertext: toHex(linkCiphertext),
+      testPlaintext: "hi over link from alice",
     },
   };
 

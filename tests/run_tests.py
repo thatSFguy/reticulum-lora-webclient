@@ -214,6 +214,51 @@ def scenario_lxmf_send(vectors, results):
         results.append(False)
 
 
+def scenario_link_handshake(vectors, results):
+    """Full 4-way Alice-initiates-link-to-Bob handshake. The JS harness
+    has already run both the initiator and the responder in-process,
+    checked that link_ids match, checked that derived keys match, and
+    encrypted a known plaintext under the derived key. Here we verify
+    that the ciphertext decrypts cleanly under RNS's own Token, which
+    proves the derived key is bit-identical to what upstream would
+    produce for the same inputs."""
+    print(f"{INFO} Scenario 4: Alice initiates link to Bob, full handshake + data")
+    handshake = vectors.get("link_handshake")
+    if not handshake:
+        print(f"   {FAIL} harness did not emit link_handshake vector")
+        results.append(False)
+        return
+
+    if handshake["linkIdInitiator"] != handshake["linkIdResponder"]:
+        print(f"   {FAIL} initiator and responder disagree on link_id")
+        results.append(False)
+        return
+
+    derived_key = bytes.fromhex(handshake["derivedKey"])
+    if len(derived_key) != 64:
+        print(f"   {FAIL} derived key is {len(derived_key)} B, expected 64")
+        results.append(False)
+        return
+
+    ciphertext = bytes.fromhex(handshake["testCiphertext"])
+    expected = handshake["testPlaintext"].encode("utf-8")
+    try:
+        token = Token(derived_key)
+        plaintext = token.decrypt(ciphertext)
+    except Exception as e:
+        print(f"   {FAIL} RNS Token.decrypt with JS derived key raised: {e}")
+        results.append(False)
+        return
+
+    if plaintext != expected:
+        print(f"   {FAIL} link plaintext mismatch: got {plaintext!r} expected {expected!r}")
+        results.append(False)
+        return
+
+    print(f"   {OK} link handshake + encrypted data round-trip succeeds under RNS Token")
+    results.append(True)
+
+
 def scenario_link_proof(vectors, results):
     """Verify that the LRPROOF our Link.validateRequest produces has a
     header, signed data, and Ed25519 signature that RNS's reference
@@ -290,6 +335,7 @@ def main():
     scenario_announce(vectors, results)
     scenario_lxmf_send(vectors, results)
     scenario_link_proof(vectors, results)
+    scenario_link_handshake(vectors, results)
 
     print()
     passed = sum(1 for r in results if r)
