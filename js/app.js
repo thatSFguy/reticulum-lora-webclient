@@ -302,6 +302,11 @@ async function handleAnnounce(pkt, rssi) {
 
   await saveContact(contact);
   renderContactList();
+  // Repeaters typically dual-announce an lxmf.delivery presence
+  // AND a telemetry destination from the same identity. Re-render
+  // the Nodes list so any matching telemetry beacon inherits this
+  // contact's display name immediately.
+  renderNodesList();
 }
 
 // ---- Non-LXMF announce handling (Nodes panel) ------------------------
@@ -412,11 +417,28 @@ function enrichNode(n) {
   return n;
 }
 
-// Human-friendly one-liner for a node row. Telemetry beacons get a
-// summarised "BAT / UP / coords" header so the list stays readable;
-// non-telemetry nodes prefer their matched service label, then the
-// raw display string, then "(unknown)".
+// Look up a human-readable node name for this identity by checking
+// the contacts list. Repeater firmware (e.g. reticulum-lora-repeater)
+// typically broadcasts both a telemetry destination AND an
+// lxmf.delivery presence destination from the same identity. The
+// lxmf.delivery one carries the configured display_name, which
+// becomes a contact entry; we reuse that here so the matching
+// telemetry beacon shows up as "Rptr-HFsolar5" instead of just a
+// service label.
+function nodeNameFromContacts(identityHashHex) {
+  if (!identityHashHex) return null;
+  for (const c of contacts.values()) {
+    if (c.identityHash === identityHashHex) return c.displayName;
+  }
+  return null;
+}
+
+// Human-friendly one-liner for a node row. Preference order for the
+// header prefix: contact-matched node name → matched service label
+// → "Telemetry" placeholder. Telemetry beacons get a summarised
+// "BAT / UP / coords" tail so the list stays readable.
 function nodeDisplayLabel(n) {
+  const nodeName = nodeNameFromContacts(n.identityHash);
   if (n.telemetry) {
     const bits = [];
     if (n.telemetry.bat) {
@@ -428,9 +450,10 @@ function nodeDisplayLabel(n) {
     if (n.lat != null && n.lon != null) {
       bits.push(`${n.lat.toFixed(3)}, ${n.lon.toFixed(3)}`);
     }
-    const prefix = n.appLabel || 'Telemetry';
+    const prefix = nodeName || n.appLabel || 'Telemetry';
     return `${prefix} · ${bits.join(' · ') || 'no fields'}`;
   }
+  if (nodeName) return nodeName;
   if (n.appLabel) return n.appLabel;
   return n.displayName || '(unknown)';
 }
@@ -592,6 +615,10 @@ function nodePopupHtml(n) {
   const rows = [];
   rows.push(`<div class="popup-title">${escapeHtml(nodeDisplayLabel(n))}</div>`);
   rows.push(`<div class="popup-sub">${n.hash.substring(0, 24)}…</div>`);
+  const nodeName = nodeNameFromContacts(n.identityHash);
+  if (nodeName) {
+    rows.push(`<div class="popup-kv"><span class="popup-kv-key">name</span><span>${escapeHtml(nodeName)}</span></div>`);
+  }
   if (n.identityHash) {
     rows.push(`<div class="popup-kv"><span class="popup-kv-key">node</span><span>${n.identityHash.substring(0, 16)}…</span></div>`);
   }
