@@ -466,13 +466,17 @@ async function renderNodesList() {
     const serviceCell = n.appName
       ? `<span>service <code>${escapeHtml(n.appName)}</code></span>`
       : `<span>name_hash <code>${nameHashHex}…</code></span>`;
+    const identityCell = n.identityHash
+      ? `<span title="Identity hash — stable per-node identifier">node <code>${n.identityHash.substring(0, 16)}…</code></span>`
+      : '';
     li.innerHTML =
       `<div class="node-row-top">
          <div class="node-name">${escapeHtml(label)}${hasCoords ? ' <span class="node-geo-dot" title="Has coordinates">●</span>' : ''}</div>
          <button class="node-delete" title="Forget this node">\u00d7</button>
        </div>
        <div class="node-meta">
-         <span>dest <code>${n.hash.substring(0, 16)}…</code></span>
+         ${identityCell}
+         <span title="Destination hash — service endpoint on this node">dest <code>${n.hash.substring(0, 16)}…</code></span>
          ${serviceCell}
          <span>RSSI ${rssi}</span>
          <span>${ts}</span>
@@ -588,6 +592,9 @@ function nodePopupHtml(n) {
   const rows = [];
   rows.push(`<div class="popup-title">${escapeHtml(nodeDisplayLabel(n))}</div>`);
   rows.push(`<div class="popup-sub">${n.hash.substring(0, 24)}…</div>`);
+  if (n.identityHash) {
+    rows.push(`<div class="popup-kv"><span class="popup-kv-key">node</span><span>${n.identityHash.substring(0, 16)}…</span></div>`);
+  }
   if (n.appName) {
     rows.push(`<div class="popup-kv"><span class="popup-kv-key">service</span><span>${escapeHtml(n.appName)}</span></div>`);
   }
