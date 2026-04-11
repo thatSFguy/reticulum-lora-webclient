@@ -12,6 +12,7 @@ import { parseAnnounce, validateAnnounce, buildAnnounce, extractDisplayName, con
 import { encrypt, decrypt } from './crypto.js';
 import { unpackMessage, unpackLinkMessage, verifyMessageSignature, packMessage } from './lxmf.js';
 import { Link, LINK_ACTIVE, LINK_CLOSED, computePacketFullHash } from './link.js';
+import { lookupDestination } from './known-destinations.js';
 import { ed25519 } from '@noble/curves/ed25519';
 
 // Reticulum packet context values relevant to link traffic
@@ -332,10 +333,16 @@ async function handleNonLxmfAnnounce(announce, pkt, rssi) {
   const lat = telemetry ? parseFloat(telemetry.lat) : NaN;
   const lon = telemetry ? parseFloat(telemetry.lon) : NaN;
 
+  // Identify the service from the 10-byte name_hash so the UI can
+  // show "rlr.telemetry" etc. instead of the raw hex.
+  const known = lookupDestination(announce.nameHash);
+
   const node = {
     hash: destHashHex,
     identityHash: idHash,
     nameHash: Array.from(announce.nameHash),
+    appName: known ? known.name : null,
+    appLabel: known ? known.label : null,
     displayName,
     telemetry: telemetry || null,
     lat: Number.isFinite(lat) ? lat : null,
@@ -346,7 +353,9 @@ async function handleNonLxmfAnnounce(announce, pkt, rssi) {
   };
   await saveNode(node);
 
-  log('info', `  Non-LXMF announce from ${idHash.substring(0, 12)}... → Nodes panel${node.lat != null ? ` (lat=${node.lat.toFixed(4)}, lon=${node.lon.toFixed(4)})` : ''}`);
+  const serviceLabel = known ? ` (${known.name})` : '';
+  const coordsLabel = node.lat != null ? ` (lat=${node.lat.toFixed(4)}, lon=${node.lon.toFixed(4)})` : '';
+  log('info', `  Non-LXMF announce from ${idHash.substring(0, 12)}...${serviceLabel} → Nodes panel${coordsLabel}`);
   renderNodesList();
 }
 
@@ -376,39 +385,54 @@ function parseTelemetry(s) {
   return hits > 0 ? out : null;
 }
 
-// Backfill telemetry/lat/lon on node rows that were saved before this
-// feature landed. Mutates and returns the row.
+// Backfill telemetry/lat/lon and the service-name lookup on node rows
+// that were saved before those features landed. Mutates and returns
+// the row.
 function enrichNode(n) {
   if (!n) return n;
-  if (n.telemetry || (n.lat != null && n.lon != null)) return n;
-  const tel = parseTelemetry(n.displayName);
-  if (!tel) return n;
-  n.telemetry = tel;
-  const lat = parseFloat(tel.lat);
-  const lon = parseFloat(tel.lon);
-  if (Number.isFinite(lat) && Number.isFinite(lon)) {
-    n.lat = lat;
-    n.lon = lon;
+  if (!n.appName && n.nameHash) {
+    const known = lookupDestination(n.nameHash);
+    if (known) {
+      n.appName = known.name;
+      n.appLabel = known.label;
+    }
+  }
+  if (!n.telemetry && !(n.lat != null && n.lon != null)) {
+    const tel = parseTelemetry(n.displayName);
+    if (tel) {
+      n.telemetry = tel;
+      const lat = parseFloat(tel.lat);
+      const lon = parseFloat(tel.lon);
+      if (Number.isFinite(lat) && Number.isFinite(lon)) {
+        n.lat = lat;
+        n.lon = lon;
+      }
+    }
   }
   return n;
 }
 
 // Human-friendly one-liner for a node row. Telemetry beacons get a
 // summarised "BAT / UP / coords" header so the list stays readable;
-// non-telemetry nodes keep their raw label.
+// non-telemetry nodes prefer their matched service label, then the
+// raw display string, then "(unknown)".
 function nodeDisplayLabel(n) {
-  if (!n.telemetry) return n.displayName || '(unknown)';
-  const bits = [];
-  if (n.telemetry.bat) {
-    const mv = parseInt(n.telemetry.bat, 10);
-    if (Number.isFinite(mv)) bits.push(`${(mv / 1000).toFixed(2)} V`);
-    else bits.push(`bat ${n.telemetry.bat}`);
+  if (n.telemetry) {
+    const bits = [];
+    if (n.telemetry.bat) {
+      const mv = parseInt(n.telemetry.bat, 10);
+      if (Number.isFinite(mv)) bits.push(`${(mv / 1000).toFixed(2)} V`);
+      else bits.push(`bat ${n.telemetry.bat}`);
+    }
+    if (n.telemetry.up) bits.push(`up ${n.telemetry.up}`);
+    if (n.lat != null && n.lon != null) {
+      bits.push(`${n.lat.toFixed(3)}, ${n.lon.toFixed(3)}`);
+    }
+    const prefix = n.appLabel || 'Telemetry';
+    return `${prefix} · ${bits.join(' · ') || 'no fields'}`;
   }
-  if (n.telemetry.up) bits.push(`up ${n.telemetry.up}`);
-  if (n.lat != null && n.lon != null) {
-    bits.push(`${n.lat.toFixed(3)}, ${n.lon.toFixed(3)}`);
-  }
-  return `Telemetry · ${bits.join(' · ') || 'no fields'}`;
+  if (n.appLabel) return n.appLabel;
+  return n.displayName || '(unknown)';
 }
 
 async function renderNodesList() {
@@ -438,6 +462,10 @@ async function renderNodesList() {
     const rssi = (typeof n.rssi === 'number') ? `${n.rssi} dBm` : 'n/a';
     const label = nodeDisplayLabel(n);
     const hasCoords = n.lat != null && n.lon != null;
+    const nameHashHex = toHex(new Uint8Array(n.nameHash)).substring(0, 12);
+    const serviceCell = n.appName
+      ? `<span>service <code>${escapeHtml(n.appName)}</code></span>`
+      : `<span>name_hash <code>${nameHashHex}…</code></span>`;
     li.innerHTML =
       `<div class="node-row-top">
          <div class="node-name">${escapeHtml(label)}${hasCoords ? ' <span class="node-geo-dot" title="Has coordinates">●</span>' : ''}</div>
@@ -445,7 +473,7 @@ async function renderNodesList() {
        </div>
        <div class="node-meta">
          <span>dest <code>${n.hash.substring(0, 16)}…</code></span>
-         <span>name_hash <code>${toHex(new Uint8Array(n.nameHash)).substring(0, 12)}…</code></span>
+         ${serviceCell}
          <span>RSSI ${rssi}</span>
          <span>${ts}</span>
        </div>`;
@@ -560,6 +588,9 @@ function nodePopupHtml(n) {
   const rows = [];
   rows.push(`<div class="popup-title">${escapeHtml(nodeDisplayLabel(n))}</div>`);
   rows.push(`<div class="popup-sub">${n.hash.substring(0, 24)}…</div>`);
+  if (n.appName) {
+    rows.push(`<div class="popup-kv"><span class="popup-kv-key">service</span><span>${escapeHtml(n.appName)}</span></div>`);
+  }
   if (n.telemetry) {
     for (const [k, v] of Object.entries(n.telemetry)) {
       rows.push(`<div class="popup-kv"><span class="popup-kv-key">${escapeHtml(k)}</span><span>${escapeHtml(v)}</span></div>`);
