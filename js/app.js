@@ -1607,6 +1607,33 @@ function isCapacitorNative() {
   return !!(window.Capacitor && typeof window.Capacitor.isNativePlatform === 'function' && window.Capacitor.isNativePlatform());
 }
 
+// Show or remove the ws:// security warning banner. If the user
+// connects to a remote host over unencrypted ws:// (as opposed to
+// wss:// or localhost), a notice is injected at the top of the
+// Settings connect card so it is visible in the same view where
+// they entered the URL. Removed on disconnect.
+function checkWsSecurityWarning(url) {
+  document.querySelector('.ws-security-warning')?.remove();
+  try {
+    const parsed = new URL(url);
+    const isLocal = ['localhost', '127.0.0.1', '::1', '[::1]'].includes(parsed.hostname);
+    const isSecure = parsed.protocol === 'wss:';
+    if (isLocal || isSecure) return;
+    const banner = document.createElement('div');
+    banner.className = 'ws-security-warning notice err';
+    banner.innerHTML =
+      `<strong>Unencrypted WebSocket connection.</strong> ` +
+      `Connected to <code>${escapeHtml(parsed.host)}</code> over ` +
+      `<code>ws://</code>. Reticulum packet headers (destination hashes, ` +
+      `packet types) are visible to network observers on this path. ` +
+      `Message content remains end-to-end encrypted. Use <code>wss://</code> ` +
+      `for remote connections if your bridge supports TLS.`;
+    const card = document.querySelector('.view-settings .settings-card');
+    if (card) card.prepend(banner);
+    log('err', `WARNING: ws:// to remote host ${parsed.host} — packet headers are unencrypted on this path`);
+  } catch (_) { /* URL parse failed — let connect() fail on its own */ }
+}
+
 // Connect
 async function connect(transportType) {
   try {
@@ -1622,6 +1649,7 @@ async function connect(transportType) {
       const url = ($('ws-url').value || '').trim();
       if (!url) { log('err', 'WebSocket URL is empty'); return; }
       rnode = new RnsdInterface(url);
+      checkWsSecurityWarning(url);
     } else if (transportType === 'ble' && isCapacitorNative()) {
       log('info', 'Using native BLE transport (Capacitor)');
       rnode = new RNode('ble-native');
@@ -1701,6 +1729,7 @@ $('btn-disconnect').addEventListener('click', async () => {
   $('btn-disconnect').classList.add('hidden');
   setConnectButtonsHidden(false);
   $('ws-url-row').classList.remove('hidden');
+  document.querySelector('.ws-security-warning')?.remove();
   radioOn = false;
   setRadioStatus('', false);
   log('info', 'Disconnected');

@@ -23,10 +23,13 @@ let _BleClient = null;
 
 async function getBleClient() {
   if (_BleClient) return _BleClient;
-  // esm.sh bundles the plugin's JS shim into an ESM import. The
-  // shim looks for window.Capacitor.Plugins.BluetoothLe, which the
-  // native APK layer injects at startup — so the same URL that
-  // would throw in a normal browser just works inside the APK.
+  // TODO: Supply-chain risk — this is still loaded from a third-party
+  // CDN without integrity verification. Self-hosting is non-trivial
+  // because the plugin's JS shim imports @capacitor/core, which
+  // itself has deep dependencies. For APK builds the plugin is
+  // installed via npm and synced by Capacitor, so the CDN is only
+  // hit when running in a plain browser (where native BLE won't work
+  // anyway). Revisit if Capacitor adds a pre-bundled ESM export.
   const mod = await import('https://esm.sh/@capacitor-community/bluetooth-le@6.1.0');
   _BleClient = mod.BleClient;
   if (!_BleClient) throw new Error('BleClient not found in plugin module');

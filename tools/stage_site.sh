@@ -14,7 +14,7 @@ set -euo pipefail
 rm -rf www
 mkdir -p www
 cp index.html www/
-cp -r css js www/
+cp -r css js lib www/
 # .nojekyll is a no-op inside the WebView but keeping it means the
 # www/ layout is a bit-for-bit mirror of what Pages serves.
 touch www/.nojekyll

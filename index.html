@@ -394,6 +394,56 @@
           your messages. Message history is stored in IndexedDB, never uploaded
           anywhere. Closing or clearing the site data wipes everything local.</p>
 
+          <h4>Security and trust model</h4>
+          <p>This section describes what the app protects and what it does not,
+          so you can make an informed decision about the risks you accept.</p>
+          <ul>
+            <li><strong>End-to-end encryption</strong> — every LXMF message is
+              encrypted with a fresh ephemeral X25519 key exchange and AES-256-CBC
+              + HMAC before it leaves your browser. Neither the radio, the
+              transport daemon, nor any relay node can read message content.
+              Delivery receipts on link-delivered messages are signed with
+              Ed25519 and are unforgeable.</li>
+            <li><strong>Private keys at rest</strong> — your Ed25519 signing key,
+              X25519 encryption key, and ratchet key are stored
+              <em>unencrypted</em> in your browser's IndexedDB. Anyone with
+              access to your browser profile (browser extensions, device backup
+              tools, physical access to an unlocked device) can extract them.
+              The <em>Export Identity</em> file is likewise unencrypted JSON
+              containing the full private keys. Treat it like a password and
+              store it somewhere safe.</li>
+            <li><strong>Forward secrecy</strong> — the ratchet key is generated
+              once when your identity is created and is never rotated. It does
+              not provide forward secrecy in the current implementation. If an
+              attacker obtains your private key, they can decrypt past messages
+              they previously captured.</li>
+            <li><strong>BLE transport</strong> — the Bluetooth link between your
+              device and the RNode modem is <em>not</em> encrypted at the radio
+              layer (no BLE bonding). An observer within Bluetooth range (~10 m)
+              can see the encrypted Reticulum packets and their headers
+              (destination hashes, packet types, sizes, timing) but cannot
+              decrypt the message content inside them.</li>
+            <li><strong>WebSocket transport</strong> — when connecting to a
+              remote <code>rnsd</code> daemon over <code>ws://</code> (not
+              <code>wss://</code>), Reticulum packet headers are visible to
+              any network observer on the path. Message content remains
+              end-to-end encrypted. Use <code>wss://</code> for remote
+              connections if your bridge supports TLS. A warning banner appears
+              in the app when a non-localhost <code>ws://</code> connection is
+              active.</li>
+            <li><strong>Metadata</strong> — Reticulum packet headers contain
+              destination hashes in cleartext by design. Any observer on the
+              radio channel or transport path can see <em>who</em> is
+              communicating with <em>whom</em> (by destination hash) and the
+              timing and size of packets, even though they cannot read the
+              content. Periodic announces broadcast your public key, display
+              name, and destination hash to the mesh.</li>
+            <li><strong>Map tiles</strong> — the Nodes map loads tiles from
+              OpenStreetMap (<code>tile.openstreetmap.org</code>). The tile
+              server sees your IP address and the geographic area you are
+              viewing, though it does not see your identity or messages.</li>
+          </ul>
+
         </div>
       </details>
 
@@ -453,8 +503,8 @@
 <script type="importmap">
 {
   "imports": {
-    "@noble/curves/ed25519": "https://esm.sh/@noble/curves@1.8.1/ed25519",
-    "@msgpack/msgpack": "https://esm.sh/@msgpack/msgpack@3.0.0-beta2"
+    "@noble/curves/ed25519": "./lib/noble-curves-ed25519.js",
+    "@msgpack/msgpack": "./lib/msgpack.js"
   }
 }
 </script>
