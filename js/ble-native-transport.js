@@ -46,6 +46,7 @@ export class BleNativeTransport {
     this._onReceive = null;
     this._onDisconnect = null;
     this._onLog = null;
+    this._writeLock = Promise.resolve();  // serializes concurrent writes
   }
 
   get connected() {
@@ -129,36 +130,42 @@ export class BleNativeTransport {
     this.deviceId = null;
   }
 
-  // Write bytes to the device, chunked at the MTU. Uses
-  // writeWithoutResponse (GATT Write Command) because the RNode's
-  // NUS TX characteristic does not support Write Request (with
-  // response) — attempting BleClient.write() times out since the
-  // peripheral never sends an ACK.
+  // Write bytes to the device, chunked at the MTU. Serialized so
+  // concurrent callers (e.g., the retry tick and a manual send)
+  // can't interleave their chunks and corrupt the KISS framing.
   //
-  // To prevent Android's local BLE write buffer from overflowing
-  // (which kills the GATT connection), a 25ms pause is inserted
-  // between chunks. This covers one BLE connection interval
-  // (typically 7.5-30ms) so the peripheral has time to drain each
-  // chunk before the next arrives. An 11-chunk announce takes
-  // ~275ms total — imperceptible to the user, completely reliable.
+  // Uses writeWithoutResponse (GATT Write Command) because the
+  // RNode's NUS TX characteristic does not support Write Request.
+  // A 35ms pause between chunks prevents Android's BLE write
+  // buffer from overflowing — covers the worst-case BLE connection
+  // interval (30ms) with margin. An 11-chunk announce takes ~385ms.
   async write(data) {
-    if (!this.deviceId) throw new Error('Not connected');
-    const BleClient = await getBleClient();
-    const bytes = data instanceof Uint8Array ? data : new Uint8Array(data);
-    const chunkSize = this.mtu;
-    for (let offset = 0; offset < bytes.length; offset += chunkSize) {
-      const end = Math.min(offset + chunkSize, bytes.length);
-      const chunk = bytes.slice(offset, end);
-      const view = new DataView(chunk.buffer);
-      await BleClient.writeWithoutResponse(
-        this.deviceId,
-        NUS_SERVICE_UUID,
-        NUS_TX_UUID,
-        view,
-      );
-      if (end < bytes.length) {
-        await new Promise(r => setTimeout(r, 25));
+    // Wait for any in-flight write to finish before starting ours.
+    // This prevents chunk interleaving from concurrent callers.
+    await this._writeLock;
+    let unlock;
+    this._writeLock = new Promise(r => { unlock = r; });
+    try {
+      if (!this.deviceId) throw new Error('Not connected');
+      const BleClient = await getBleClient();
+      const bytes = data instanceof Uint8Array ? data : new Uint8Array(data);
+      const chunkSize = this.mtu;
+      for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+        const end = Math.min(offset + chunkSize, bytes.length);
+        const chunk = bytes.slice(offset, end);
+        const view = new DataView(chunk.buffer);
+        await BleClient.writeWithoutResponse(
+          this.deviceId,
+          NUS_SERVICE_UUID,
+          NUS_TX_UUID,
+          view,
+        );
+        if (end < bytes.length) {
+          await new Promise(r => setTimeout(r, 35));
+        }
       }
+    } finally {
+      unlock();
     }
   }
 }
