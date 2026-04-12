@@ -89,16 +89,28 @@ export class BleNativeTransport {
 
     // Negotiate a higher MTU. The default ATT MTU is 23 (20 payload).
     // Chrome's Web Bluetooth auto-negotiates 244-512 during connect;
-    // the Capacitor plugin does not. Without this, a ~200-byte
-    // announce KISS frame needs ~11 rapid writeWithoutResponse calls
-    // that can overflow Android's local BLE write buffer and kill the
-    // connection. With a 517-byte MTU the same frame fits in 1 write.
-    try {
-      const negotiated = await BleClient.requestMtu(device.deviceId, 517);
-      this.mtu = negotiated - 3;  // ATT header overhead
-      this._log(`MTU negotiated: ${negotiated} (payload ${this.mtu})`);
-    } catch (e) {
-      this._log(`MTU negotiation failed (${e.message}), keeping default ${this.mtu}`);
+    // the Capacitor plugin does not. Without a higher MTU, every
+    // outbound packet is chunked into 20-byte writes with 35ms pacing
+    // (~420ms per packet), which is noticeably slower than native apps
+    // that negotiate 512-byte MTU and write in a single shot (~1ms).
+    //
+    // Some BLE stacks reject MTU requests that arrive immediately
+    // after GATT connect (service discovery still in progress), so
+    // wait 500ms before trying. Try 517 first (maximum useful for
+    // Reticulum's 500-byte MTU), then fall back to 256, then 128.
+    await new Promise(r => setTimeout(r, 500));
+    for (const tryMtu of [517, 256, 128]) {
+      try {
+        const negotiated = await BleClient.requestMtu(device.deviceId, tryMtu);
+        this.mtu = Math.max(negotiated - 3, 20);  // ATT header overhead
+        this._log(`MTU negotiated: ${negotiated} (payload ${this.mtu})`);
+        break;
+      } catch (e) {
+        this._log(`MTU ${tryMtu} rejected: ${e.message || e}`);
+      }
+    }
+    if (this.mtu <= 20) {
+      this._log(`MTU negotiation failed at all sizes, using 20-byte chunks with 35ms pacing`);
     }
 
     // Subscribe to RX notifications. The callback receives a
