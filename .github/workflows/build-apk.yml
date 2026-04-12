@@ -108,42 +108,46 @@ jobs:
             echo "See build-apk.yml header for setup instructions."
             exit 1
           fi
-          # Print only the length of the secret — safe to log, does
-          # not leak the value. A realistic keystore base64 is
-          # roughly 3-5 KB.
-          echo "Secret length: ${#KEYSTORE_BASE64} bytes"
-
-          # Strip every kind of whitespace before decoding. Pasting
-          # a base64 blob through a web terminal + browser clipboard
-          # can introduce CR, LF, or U+00A0 characters that base64 -d
-          # rejects even though the underlying data is fine. `tr`
-          # handles the ASCII whitespace; base64 -i/--ignore-garbage
-          # tolerates anything left over.
-          CLEAN=$(printf '%s' "$KEYSTORE_BASE64" | tr -d '[:space:]')
-          echo "Clean base64 length: ${#CLEAN} bytes"
-
-          printf '%s' "$CLEAN" | base64 -d --ignore-garbage > android/app/release.keystore
-
-          # Sanity check: a Java keystore is at minimum ~1 KB. If
-          # the decoded file is trivially small the secret was
-          # truncated on paste or the wrong value got stored.
-          if [ ! -s android/app/release.keystore ]; then
-            echo "FATAL: decoded keystore is empty."
-            exit 1
-          fi
-          SIZE=$(stat -c%s android/app/release.keystore)
-          echo "Decoded keystore size: ${SIZE} bytes"
-          if [ "$SIZE" -lt 1000 ]; then
-            echo "FATAL: decoded keystore is suspiciously small (<1KB)."
-            echo "The ANDROID_KEYSTORE_BASE64 secret is likely truncated."
-            echo "Re-run 'base64 -w 0 release.keystore' in the Codespace"
-            echo "and re-paste the full single-line output into the secret."
-            exit 1
-          fi
-
-          # Print the first few bytes in hex — a valid JKS keystore
-          # starts with FE ED FE ED, PKCS12 starts with 30 82.
-          head -c 4 android/app/release.keystore | xxd | head -1 || true
+          python - <<'PY'
+          import base64, os, re, sys
+          raw = os.environ['KEYSTORE_BASE64']
+          print(f"Raw secret length: {len(raw)} bytes")
+          # Drop every character that is NOT in the base64 alphabet.
+          # Catches whitespace, CR/LF, zero-width spaces, and any
+          # stray junk from copy-paste through a browser terminal.
+          clean = re.sub(r'[^A-Za-z0-9+/=]', '', raw)
+          print(f"Cleaned base64 length: {len(clean)} bytes")
+          # Re-pad to a multiple of 4. Some terminals or the GitHub
+          # secrets UI occasionally swallow trailing '=' characters,
+          # which breaks strict base64 decoders but is harmless to
+          # re-add because the original padding is deterministic.
+          if len(clean) % 4:
+              pad = 4 - (len(clean) % 4)
+              clean = clean + ('=' * pad)
+              print(f"Padded to multiple of 4 with {pad} '=' — new length {len(clean)}")
+          try:
+              data = base64.b64decode(clean, validate=False)
+          except Exception as e:
+              print(f"FATAL: base64 decode failed: {e}", file=sys.stderr)
+              sys.exit(1)
+          print(f"Decoded bytes: {len(data)}")
+          if len(data) < 1000:
+              print("FATAL: decoded keystore is suspiciously small (<1KB).")
+              print("The ANDROID_KEYSTORE_BASE64 secret is likely truncated.")
+              print("Re-run 'base64 -w 0 release.keystore' in the Codespace")
+              print("and re-paste the full single-line output into the secret.")
+              sys.exit(1)
+          # JKS magic is FE ED FE ED, PKCS12 magic is 30 82.
+          head = data[:4].hex()
+          print(f"Decoded file starts with: {head}")
+          if not (head.startswith('feedfeed') or head.startswith('3082')):
+              print("WARNING: decoded file does not look like a Java keystore")
+              print("(neither JKS nor PKCS12 magic bytes at offset 0). Build")
+              print("may still work if Android tooling recognises the format.")
+          with open('android/app/release.keystore', 'wb') as f:
+              f.write(data)
+          PY
+          ls -la android/app/release.keystore
 
       - name: Build signed release APK
         env:
