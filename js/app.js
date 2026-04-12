@@ -199,15 +199,18 @@ async function onPacket(data, rssi, snr) {
   }
 
   const hashHex = toHex(pkt.destHash).substring(0, 12);
-  log('rx', `RX ${data.length}B RSSI=${rssi} SNR=${snr} ${PACKET_TYPE_NAMES[pkt.packetType]} dest=${hashHex}...`);
+  const hdrLabel = pkt.headerType === 0x01 ? ' H2' : '';
+  log('rx', `RX ${data.length}B RSSI=${rssi} SNR=${snr} hops=${pkt.hops}${hdrLabel} ${PACKET_TYPE_NAMES[pkt.packetType]} dest=${hashHex}...`);
+
+  const rxInfo = { rssi, snr, hops: pkt.hops, headerType: pkt.headerType };
 
   if (pkt.packetType === PACKET_ANNOUNCE) {
     await handleAnnounce(pkt, rssi);
   } else if (pkt.packetType === PACKET_DATA) {
     if (pkt.destType === DEST_LINK) {
-      await handleLinkData(pkt, rssi);
+      await handleLinkData(pkt, rxInfo);
     } else {
-      await handleData(pkt, rssi);
+      await handleData(pkt, rxInfo);
     }
   } else if (pkt.packetType === PACKET_LINKREQ) {
     if (myDestHash && arraysEqual(pkt.destHash, myDestHash)) {
@@ -655,8 +658,7 @@ function focusNodeOnMap(hash) {
 
 // ---- Data packet handling (incoming messages) -------------------------
 
-async function handleData(pkt, rssi) {
-  // Always log incoming DATA dest hash so we can see what's arriving
+async function handleData(pkt, rxInfo) {
   const incomingHex = toHex(pkt.destHash);
   const ourHex = myDestHash ? toHex(myDestHash) : '(none)';
   const matches = myDestHash && arraysEqual(pkt.destHash, myDestHash);
@@ -670,16 +672,10 @@ async function handleData(pkt, rssi) {
   log('info', '  Packet addressed to us — attempting decrypt...');
 
   try {
-    // The packet data (after RNS header) is the encrypted LXMF payload.
-    // Try the ratchet private key first (most traffic will be encrypted
-    // to it once we advertise one) and fall back to the long-term
-    // identity X25519 key for senders that haven't seen our ratchet yet.
     const candidatePrivs = [myIdentity.ratchetPrivKey, myIdentity.encPrivKey].filter(Boolean);
     const plaintext = await decrypt(pkt.payload, candidatePrivs, myIdentity.hash);
-
-    // Unpack LXMF message (opportunistic form: dest hash stripped)
     const msg = await unpackMessage(plaintext, myDestHash);
-    await dispatchIncomingMessage(msg, rssi);
+    await dispatchIncomingMessage(msg, rxInfo);
   } catch (e) {
     log('err', `  Decrypt/parse failed: ${e.message}`);
   }
@@ -692,9 +688,11 @@ async function handleData(pkt, rssi) {
 // (sourceHash, timestamp, content) tuple, so we hash that tuple
 // into a dedupe key and drop subsequent hits within the same
 // session. Persisted rows already contain only one copy because
-// the dedupe ran before saving.
-const recentMessageKeys = new Set();
-const RECENT_MESSAGE_KEY_LIMIT = 500;
+// the dedupe ran before saving. The Map value tracks the saved
+// message's IndexedDB id and a running count of duplicate
+// arrivals so the UI can display "×3" next to the message.
+const recentMessageMap = new Map();  // dedupeKey → { dbId, dupeCount }
+const RECENT_MESSAGE_MAP_LIMIT = 500;
 
 function messageDedupeKey(sourceHashHex, content, timestamp) {
   return `${sourceHashHex}|${timestamp ?? 'null'}|${content ?? ''}`;
@@ -740,28 +738,26 @@ function playMessageBeep() {
 }
 
 // Common post-decrypt handling shared between opportunistic (handleData)
-// and link-delivered (handleLinkData) inbound LXMF messages. Takes an
-// already-unpacked LXMF message object and the RSSI of the carrying packet.
-async function dispatchIncomingMessage(msg, rssi) {
+// and link-delivered (handleLinkData) inbound LXMF messages.
+// rxInfo = { rssi, snr, hops, headerType }
+async function dispatchIncomingMessage(msg, rxInfo) {
   const sourceHashHex = toHex(msg.sourceHash);
   let senderName = sourceHashHex.substring(0, 8);
   let contactHash = null;
 
-  // Diagnostic view of the payload the verifier is about to check.
   log('info', `  LXMF payload: elements=${msg.payloadElementCount} raw_msgpack=${msg.msgpackData.length}B stripped=${msg.msgpackForHash.length}B destHashInBody=${toHex(msg.destHash).substring(0, 16)}...`);
 
-  // Session-level dedupe: drop exact repeats of a message we already
-  // handled in this session. Key = (sourceHash, timestamp, content).
+  // Session-level dedupe. On a duplicate, increment the count on
+  // the already-saved row and re-render so the user sees "×2", "×3",
+  // etc. but no new bubble appears.
   const dedupeKey = messageDedupeKey(sourceHashHex, msg.content, msg.timestamp);
-  if (recentMessageKeys.has(dedupeKey)) {
-    log('info', `  Duplicate message from ${sourceHashHex.substring(0, 12)}... ignored`);
+  const existing = recentMessageMap.get(dedupeKey);
+  if (existing) {
+    existing.dupeCount++;
+    log('info', `  Duplicate #${existing.dupeCount} from ${sourceHashHex.substring(0, 12)}... (hops=${rxInfo.hops} RSSI=${rxInfo.rssi})`);
+    await updateMessage(existing.dbId, { dupeCount: existing.dupeCount });
+    if (activeContactHash) await renderMessages(activeContactHash);
     return;
-  }
-  recentMessageKeys.add(dedupeKey);
-  if (recentMessageKeys.size > RECENT_MESSAGE_KEY_LIMIT) {
-    // Evict oldest entry — Set iteration order is insertion order.
-    const iter = recentMessageKeys.values();
-    recentMessageKeys.delete(iter.next().value);
   }
 
   for (const [hash, c] of contacts) {
@@ -778,12 +774,9 @@ async function dispatchIncomingMessage(msg, rssi) {
     }
   }
 
-  log('ok', `  Message from "${senderName}": ${msg.content}`);
+  const via = rxInfo.hops === 0 ? 'direct' : `${rxInfo.hops} hop${rxInfo.hops > 1 ? 's' : ''}`;
+  log('ok', `  Message from "${senderName}" (${via}, RSSI=${rxInfo.rssi}, SNR=${rxInfo.snr}): ${msg.content}`);
 
-  // Fall back to receive time when the sender's clock is bogus so
-  // newly-saved rows render in a meaningful place in the timeline
-  // instead of showing up as "Jan 1, 1970". Clockless Reticulum
-  // nodes (no RTC) send seconds-since-boot as their LXMF timestamp.
   const senderTs = normalizeLxmfTimestamp(msg.timestamp);
   const savedMsg = {
     contactHash: contactHash || sourceHashHex,
@@ -792,12 +785,22 @@ async function dispatchIncomingMessage(msg, rssi) {
     title: msg.title,
     timestamp: senderTs != null ? senderTs : Date.now(),
     senderTimeMissing: senderTs == null,
-    rssi,
+    rssi: rxInfo.rssi,
+    snr: rxInfo.snr,
+    hops: rxInfo.hops,
+    headerType: rxInfo.headerType,
+    dupeCount: 1,
   };
-  await saveMessage(savedMsg);
+  const dbId = await saveMessage(savedMsg);
   log('info', `  Saved under contactHash=${savedMsg.contactHash.substring(0, 16)}... activeContact=${activeContactHash ? activeContactHash.substring(0, 16) + '...' : '(none)'}`);
 
-  // Audible + haptic alert for any genuinely new inbound message.
+  // Track in the dedupe map so future duplicates increment the count.
+  recentMessageMap.set(dedupeKey, { dbId, dupeCount: 1 });
+  if (recentMessageMap.size > RECENT_MESSAGE_MAP_LIMIT) {
+    const iter = recentMessageMap.keys();
+    recentMessageMap.delete(iter.next().value);
+  }
+
   playMessageBeep();
 
   if (activeContactHash === savedMsg.contactHash) {
@@ -863,7 +866,7 @@ async function handleLinkRequest(pkt) {
   }
 }
 
-async function handleLinkData(pkt, rssi) {
+async function handleLinkData(pkt, rxInfo) {
   const linkIdHex = toHex(pkt.destHash);
   const link = links.get(linkIdHex);
   if (!link) {
@@ -878,7 +881,7 @@ async function handleLinkData(pkt, rssi) {
         const plaintext = await link.decrypt(pkt.payload);
         const msg = await unpackLinkMessage(plaintext);
         log('ok', `  Link ${linkIdHex.substring(0,12)}... delivered LXMF message`);
-        await dispatchIncomingMessage(msg, rssi);
+        await dispatchIncomingMessage(msg, rxInfo);
         // Send a link packet proof back so the sender's delivery
         // receipt timeout fires with success and it does not retry
         // the same message on a fresh link. Upstream's Link.receive
@@ -1431,10 +1434,27 @@ async function renderMessages(contactHash) {
     const ts = normalizeLxmfTimestamp(msg.timestamp);
     const time = ts != null ? formatMessageTime(ts) : '(no time)';
     const stateIcon = renderOutgoingStateIcon(msg);
-    div.innerHTML = `<div>${escapeHtml(msg.content)}</div><div class="meta">${time}${stateIcon}</div>`;
+    const rxMeta = renderIncomingRxMeta(msg);
+    div.innerHTML = `<div>${escapeHtml(msg.content)}</div><div class="meta">${time}${stateIcon}${rxMeta}</div>`;
     list.appendChild(div);
   }
   list.scrollTop = list.scrollHeight;
+}
+
+// Radio metadata for incoming messages: hops, RSSI, SNR, and dupe count.
+// Returns an HTML fragment for the meta line. Outgoing rows and legacy
+// rows (saved before these fields were added) return empty.
+function renderIncomingRxMeta(msg) {
+  if (msg.direction !== 'incoming') return '';
+  const parts = [];
+  if (typeof msg.hops === 'number') {
+    parts.push(msg.hops === 0 ? 'direct' : `${msg.hops} hop${msg.hops > 1 ? 's' : ''}`);
+  }
+  if (typeof msg.rssi === 'number') parts.push(`${msg.rssi} dBm`);
+  if (typeof msg.snr === 'number') parts.push(`SNR ${msg.snr}`);
+  if (msg.dupeCount > 1) parts.push(`×${msg.dupeCount}`);
+  if (parts.length === 0) return '';
+  return ` <span class="rx-meta">${escapeHtml(parts.join(' · '))}</span>`;
 }
 
 // Small state indicator for outgoing rows. Returns HTML that lives

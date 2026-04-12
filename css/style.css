@@ -680,6 +680,14 @@ a { color: var(--accent); }
 .message.outgoing .message-state.sending,
 .message.outgoing .message-state.delivered { color: rgba(255, 255, 255, 0.95); }
 
+.rx-meta {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-muted);
+  margin-left: 4px;
+}
+.message.incoming .rx-meta { color: var(--text-muted); }
+
 /* Compose */
 
 .compose {
