@@ -6,6 +6,7 @@
 'use strict';
 
 import { BleTransport } from './ble-transport.js';
+import { BleNativeTransport } from './ble-native-transport.js';
 import { SerialTransport } from './serial-transport.js';
 import {
   KissParser, buildFrame, uint32ToBytes, bytesToUint32,
@@ -17,7 +18,17 @@ import {
 
 export class RNode {
   constructor(transportType = 'ble') {
-    this.transport = transportType === 'serial' ? new SerialTransport() : new BleTransport();
+    if (transportType === 'serial') {
+      this.transport = new SerialTransport();
+    } else if (transportType === 'ble-native') {
+      // Capacitor native path — used only inside the Android APK
+      // where navigator.bluetooth is unavailable but the
+      // @capacitor-community/bluetooth-le plugin provides BLE via
+      // the host platform's native APIs.
+      this.transport = new BleNativeTransport();
+    } else {
+      this.transport = new BleTransport();
+    }
     this._callbacks = new Map();  // cmd → resolve
     this._onPacket = null;        // callback for CMD_DATA (received radio packets)
     this._onRssi = null;
