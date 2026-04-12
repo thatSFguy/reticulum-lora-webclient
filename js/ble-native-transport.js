@@ -86,6 +86,20 @@ export class BleNativeTransport {
       if (this._onDisconnect) this._onDisconnect();
     });
 
+    // Negotiate a higher MTU. The default ATT MTU is 23 (20 payload).
+    // Chrome's Web Bluetooth auto-negotiates 244-512 during connect;
+    // the Capacitor plugin does not. Without this, a ~200-byte
+    // announce KISS frame needs ~11 rapid writeWithoutResponse calls
+    // that can overflow Android's local BLE write buffer and kill the
+    // connection. With a 517-byte MTU the same frame fits in 1 write.
+    try {
+      const negotiated = await BleClient.requestMtu(device.deviceId, 517);
+      this.mtu = negotiated - 3;  // ATT header overhead
+      this._log(`MTU negotiated: ${negotiated} (payload ${this.mtu})`);
+    } catch (e) {
+      this._log(`MTU negotiation failed (${e.message}), keeping default ${this.mtu}`);
+    }
+
     // Subscribe to RX notifications. The callback receives a
     // DataView; convert to Uint8Array for consistency with
     // BleTransport.
