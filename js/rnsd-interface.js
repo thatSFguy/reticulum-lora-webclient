@@ -28,6 +28,7 @@ export class RnsdInterface {
   constructor(url) {
     this.transport = new WebSocketTransport(url);
     this._onPacket = null;
+    this._onDisconnect = null;
     this._onLog = null;
 
     // Stream HDLC frames out of whatever byte chunks the transport
@@ -62,6 +63,7 @@ export class RnsdInterface {
     this.transport._onLog = (msg) => this._log(msg);
     this.transport._onDisconnect = () => {
       this._parser.reset();
+      if (this._onDisconnect) this._onDisconnect();
     };
     await this.transport.connect();
   }

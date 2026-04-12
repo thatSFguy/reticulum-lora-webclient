@@ -1678,6 +1678,18 @@ async function connect(transportType) {
     }
     rnode._onLog = (msg) => log('info', msg);
     rnode._onPacket = onPacket;
+    rnode._onDisconnect = () => {
+      log('err', 'Transport disconnected unexpectedly');
+      if (announceTimer) { clearInterval(announceTimer); announceTimer = null; }
+      if (outboundRetryTimer) { clearInterval(outboundRetryTimer); outboundRetryTimer = null; }
+      setConnectionState(false, 'Disconnected');
+      $('btn-disconnect').classList.add('hidden');
+      setConnectButtonsHidden(false);
+      $('ws-url-row').classList.remove('hidden');
+      document.querySelector('.ws-security-warning')?.remove();
+      radioOn = false;
+      setRadioStatus('', false);
+    };
 
     await rnode.connect();
 

@@ -31,6 +31,7 @@ export class RNode {
     }
     this._callbacks = new Map();  // cmd → resolve
     this._onPacket = null;        // callback for CMD_DATA (received radio packets)
+    this._onDisconnect = null;    // callback when the transport drops unexpectedly
     this._onRssi = null;
     this._onSnr = null;
     this._lastRssi = 0;
@@ -106,6 +107,7 @@ export class RNode {
     this.transport._onDisconnect = () => {
       this._parser.reset();
       this._callbacks.clear();
+      if (this._onDisconnect) this._onDisconnect();
     };
     await this.transport.connect();
   }
