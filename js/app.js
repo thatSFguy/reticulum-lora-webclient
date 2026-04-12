@@ -685,6 +685,60 @@ async function handleData(pkt, rssi) {
   }
 }
 
+// Recent incoming LXMF dedupe set. A single logical message can
+// arrive multiple times: relayed by repeaters, retransmitted by
+// the sender's retry queue, or delivered via both opportunistic
+// and link paths. All those variants carry the same
+// (sourceHash, timestamp, content) tuple, so we hash that tuple
+// into a dedupe key and drop subsequent hits within the same
+// session. Persisted rows already contain only one copy because
+// the dedupe ran before saving.
+const recentMessageKeys = new Set();
+const RECENT_MESSAGE_KEY_LIMIT = 500;
+
+function messageDedupeKey(sourceHashHex, content, timestamp) {
+  return `${sourceHashHex}|${timestamp ?? 'null'}|${content ?? ''}`;
+}
+
+// Play a short audible alert for new incoming messages. Uses Web
+// Audio directly so no asset has to be bundled; a pair of short
+// sine beeps at A5 is noticeable but not annoying. Web Audio is
+// gated by the browser's autoplay policy, which is why we lazy-
+// initialise the AudioContext on first use — by that time the
+// user has already clicked Connect, which satisfies the user-
+// gesture requirement. Also buzzes the phone briefly when the
+// Vibration API is present (mobile browsers and the Capacitor
+// WebView).
+let _audioCtx = null;
+function playMessageBeep() {
+  try {
+    if (!_audioCtx) {
+      const Ctx = window.AudioContext || window.webkitAudioContext;
+      if (!Ctx) return;
+      _audioCtx = new Ctx();
+    }
+    if (_audioCtx.state === 'suspended') _audioCtx.resume().catch(() => {});
+    const now = _audioCtx.currentTime;
+    for (let i = 0; i < 2; i++) {
+      const osc = _audioCtx.createOscillator();
+      const gain = _audioCtx.createGain();
+      osc.type = 'sine';
+      osc.frequency.value = 880;
+      const t0 = now + i * 0.14;
+      gain.gain.setValueAtTime(0, t0);
+      gain.gain.linearRampToValueAtTime(0.18, t0 + 0.01);
+      gain.gain.linearRampToValueAtTime(0, t0 + 0.11);
+      osc.connect(gain);
+      gain.connect(_audioCtx.destination);
+      osc.start(t0);
+      osc.stop(t0 + 0.13);
+    }
+  } catch (_) { /* audio is cosmetic — never let it break message handling */ }
+  try {
+    if (navigator.vibrate) navigator.vibrate(120);
+  } catch (_) { /* ditto */ }
+}
+
 // Common post-decrypt handling shared between opportunistic (handleData)
 // and link-delivered (handleLinkData) inbound LXMF messages. Takes an
 // already-unpacked LXMF message object and the RSSI of the carrying packet.
@@ -695,6 +749,20 @@ async function dispatchIncomingMessage(msg, rssi) {
 
   // Diagnostic view of the payload the verifier is about to check.
   log('info', `  LXMF payload: elements=${msg.payloadElementCount} raw_msgpack=${msg.msgpackData.length}B stripped=${msg.msgpackForHash.length}B destHashInBody=${toHex(msg.destHash).substring(0, 16)}...`);
+
+  // Session-level dedupe: drop exact repeats of a message we already
+  // handled in this session. Key = (sourceHash, timestamp, content).
+  const dedupeKey = messageDedupeKey(sourceHashHex, msg.content, msg.timestamp);
+  if (recentMessageKeys.has(dedupeKey)) {
+    log('info', `  Duplicate message from ${sourceHashHex.substring(0, 12)}... ignored`);
+    return;
+  }
+  recentMessageKeys.add(dedupeKey);
+  if (recentMessageKeys.size > RECENT_MESSAGE_KEY_LIMIT) {
+    // Evict oldest entry — Set iteration order is insertion order.
+    const iter = recentMessageKeys.values();
+    recentMessageKeys.delete(iter.next().value);
+  }
 
   for (const [hash, c] of contacts) {
     if (c.identityHash === sourceHashHex || hash === sourceHashHex) {
@@ -728,6 +796,9 @@ async function dispatchIncomingMessage(msg, rssi) {
   };
   await saveMessage(savedMsg);
   log('info', `  Saved under contactHash=${savedMsg.contactHash.substring(0, 16)}... activeContact=${activeContactHash ? activeContactHash.substring(0, 16) + '...' : '(none)'}`);
+
+  // Audible + haptic alert for any genuinely new inbound message.
+  playMessageBeep();
 
   if (activeContactHash === savedMsg.contactHash) {
     await renderMessages(activeContactHash);
@@ -1661,8 +1732,11 @@ $('btn-stop-radio').addEventListener('click', async () => {
   setRadioStatus('Radio: OFF', false);
 });
 
-// Identity
-$('btn-announce').addEventListener('click', sendAnnounce);
+// Identity — wire every announce button (right panel on desktop,
+// Identity settings card on mobile) through the same handler.
+document.querySelectorAll('.js-announce-btn').forEach(b => {
+  b.addEventListener('click', sendAnnounce);
+});
 $('btn-new-id').addEventListener('click', async () => {
   if (!confirm('Generate new identity? Your current address will change.')) return;
   myIdentity = new Identity();
