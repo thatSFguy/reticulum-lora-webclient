@@ -83,6 +83,7 @@ export class BleNativeTransport {
     this._log('Connecting GATT...');
     await BleClient.connect(device.deviceId, () => {
       this._log('BLE disconnected');
+      this._stopHeartbeat();
       this._connected = false;
       if (this._onDisconnect) this._onDisconnect();
     });
@@ -113,9 +114,51 @@ export class BleNativeTransport {
 
     this._connected = true;
     this._log(`Connected to ${device.name || 'RNode'} via native BLE`);
+
+    // Start a BLE keep-alive heartbeat. The default BLE supervision
+    // timeout on many Android stacks is ~5 seconds. Chrome's Web
+    // Bluetooth sends internal GATT housekeeping that prevents the
+    // timeout; the Capacitor plugin does not. Without a heartbeat,
+    // the connection drops ~5s after the last write if no mesh
+    // traffic arrives to trigger an inbound BLE notification.
+    //
+    // A single FEND byte (0xC0) is a valid KISS no-op — the RNode's
+    // parser sees it as an empty frame boundary and discards it.
+    this._startHeartbeat(BleClient);
+  }
+
+  _startHeartbeat(BleClient) {
+    this._stopHeartbeat();
+    const HEARTBEAT_MS = 3000;
+    const fend = new DataView(new Uint8Array([0xC0]).buffer);
+    this._heartbeatTimer = setInterval(async () => {
+      if (!this._connected || !this.deviceId) {
+        this._stopHeartbeat();
+        return;
+      }
+      try {
+        await BleClient.writeWithoutResponse(
+          this.deviceId,
+          NUS_SERVICE_UUID,
+          NUS_TX_UUID,
+          fend,
+        );
+      } catch (_) {
+        // Write failed — connection is probably already dead,
+        // the onDisconnect callback will handle cleanup.
+      }
+    }, HEARTBEAT_MS);
+  }
+
+  _stopHeartbeat() {
+    if (this._heartbeatTimer) {
+      clearInterval(this._heartbeatTimer);
+      this._heartbeatTimer = null;
+    }
   }
 
   async disconnect() {
+    this._stopHeartbeat();
     if (!this.deviceId) return;
     try {
       const BleClient = await getBleClient();
