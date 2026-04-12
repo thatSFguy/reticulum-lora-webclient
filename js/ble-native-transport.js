@@ -94,16 +94,27 @@ export class BleNativeTransport {
       if (this._onDisconnect) this._onDisconnect();
     });
 
+    // Request HIGH connection priority — matches what Chrome does
+    // internally on every Web Bluetooth connection. HIGH gives
+    // 11-15ms connection intervals vs BALANCED's 30-50ms, making
+    // the link much more resilient under load. The RNode firmware
+    // (nRF52/Bluefruit) already requests 7.5-15ms from the
+    // peripheral side, but Android ignores that unless the app
+    // explicitly asks for HIGH priority from the central side.
+    try {
+      await BleClient.requestConnectionPriority(device.deviceId, 1); // 1 = HIGH
+      this._log('Connection priority: HIGH');
+    } catch (e) {
+      this._log(`Connection priority request failed: ${e.message || e}`);
+    }
+
     // MTU negotiation is intentionally skipped. requestMtu() causes
-    // delayed GATT disconnects on some Android BLE stacks (observed
-    // on Samsung) even when wrapped in a try/catch — the failed
-    // request corrupts internal BLE state and the connection drops
-    // a few seconds later. The 20-byte default MTU with 35ms
-    // inter-chunk pacing and write serialization is slower than a
-    // high-MTU single write (~420ms vs ~1ms per packet) but
-    // completely reliable across all tested devices. Revisit if
-    // the RNode firmware gains explicit MTU negotiation support
-    // that the Capacitor plugin can detect.
+    // delayed GATT disconnects on Samsung — the nRF52 SoftDevice
+    // already initiates MTU exchange from the peripheral side, and
+    // a second exchange from Android violates the BLE spec's one-
+    // exchange-per-connection rule. Samsung's stack doesn't handle
+    // that gracefully. The 20-byte default with pacing is slower
+    // but universally reliable.
 
     // Subscribe to RX notifications. The callback receives a
     // DataView; convert to Uint8Array for consistency with
