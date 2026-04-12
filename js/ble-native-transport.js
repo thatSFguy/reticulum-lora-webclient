@@ -87,31 +87,16 @@ export class BleNativeTransport {
       if (this._onDisconnect) this._onDisconnect();
     });
 
-    // Negotiate a higher MTU. The default ATT MTU is 23 (20 payload).
-    // Chrome's Web Bluetooth auto-negotiates 244-512 during connect;
-    // the Capacitor plugin does not. Without a higher MTU, every
-    // outbound packet is chunked into 20-byte writes with 35ms pacing
-    // (~420ms per packet), which is noticeably slower than native apps
-    // that negotiate 512-byte MTU and write in a single shot (~1ms).
-    //
-    // Some BLE stacks reject MTU requests that arrive immediately
-    // after GATT connect (service discovery still in progress), so
-    // wait 500ms before trying. Try 517 first (maximum useful for
-    // Reticulum's 500-byte MTU), then fall back to 256, then 128.
-    await new Promise(r => setTimeout(r, 500));
-    for (const tryMtu of [517, 256, 128]) {
-      try {
-        const negotiated = await BleClient.requestMtu(device.deviceId, tryMtu);
-        this.mtu = Math.max(negotiated - 3, 20);  // ATT header overhead
-        this._log(`MTU negotiated: ${negotiated} (payload ${this.mtu})`);
-        break;
-      } catch (e) {
-        this._log(`MTU ${tryMtu} rejected: ${e.message || e}`);
-      }
-    }
-    if (this.mtu <= 20) {
-      this._log(`MTU negotiation failed at all sizes, using 20-byte chunks with 35ms pacing`);
-    }
+    // MTU negotiation is intentionally skipped. requestMtu() causes
+    // delayed GATT disconnects on some Android BLE stacks (observed
+    // on Samsung) even when wrapped in a try/catch — the failed
+    // request corrupts internal BLE state and the connection drops
+    // a few seconds later. The 20-byte default MTU with 35ms
+    // inter-chunk pacing and write serialization is slower than a
+    // high-MTU single write (~420ms vs ~1ms per packet) but
+    // completely reliable across all tested devices. Revisit if
+    // the RNode firmware gains explicit MTU negotiation support
+    // that the Capacitor plugin can detect.
 
     // Subscribe to RX notifications. The callback receives a
     // DataView; convert to Uint8Array for consistency with
