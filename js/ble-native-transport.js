@@ -129,14 +129,18 @@ export class BleNativeTransport {
     this.deviceId = null;
   }
 
-  // Write bytes to the device, chunked at the MTU. Uses write-with-
-  // response (GATT Write Request) instead of writeWithoutResponse
-  // (GATT Write Command). Each chunk waits for the peripheral's ACK
-  // before sending the next, so Android's local BLE write buffer
-  // cannot overflow regardless of how many chunks are needed. This
-  // is slightly slower (~15ms per chunk vs ~2ms) but completely
-  // reliable — the 200-byte announce that was crashing the connection
-  // at 20-byte MTU now takes ~150ms instead of disconnecting.
+  // Write bytes to the device, chunked at the MTU. Uses
+  // writeWithoutResponse (GATT Write Command) because the RNode's
+  // NUS TX characteristic does not support Write Request (with
+  // response) — attempting BleClient.write() times out since the
+  // peripheral never sends an ACK.
+  //
+  // To prevent Android's local BLE write buffer from overflowing
+  // (which kills the GATT connection), a 25ms pause is inserted
+  // between chunks. This covers one BLE connection interval
+  // (typically 7.5-30ms) so the peripheral has time to drain each
+  // chunk before the next arrives. An 11-chunk announce takes
+  // ~275ms total — imperceptible to the user, completely reliable.
   async write(data) {
     if (!this.deviceId) throw new Error('Not connected');
     const BleClient = await getBleClient();
@@ -146,12 +150,15 @@ export class BleNativeTransport {
       const end = Math.min(offset + chunkSize, bytes.length);
       const chunk = bytes.slice(offset, end);
       const view = new DataView(chunk.buffer);
-      await BleClient.write(
+      await BleClient.writeWithoutResponse(
         this.deviceId,
         NUS_SERVICE_UUID,
         NUS_TX_UUID,
         view,
       );
+      if (end < bytes.length) {
+        await new Promise(r => setTimeout(r, 25));
+      }
     }
   }
 }
