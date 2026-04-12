@@ -23,16 +23,22 @@ let _BleClient = null;
 
 async function getBleClient() {
   if (_BleClient) return _BleClient;
-  // Self-hosted bundle with @capacitor/core inlined. At runtime
-  // inside the Capacitor WebView, the inlined core discovers the
-  // native bridge via window.Capacitor (injected by the native
-  // shell on APK startup). In a plain browser where window.
-  // Capacitor does not exist, the plugin falls back to its Web
-  // Bluetooth implementation (which is equivalent to our regular
-  // BleTransport and never actually gets called because app.js
-  // only routes to BleNativeTransport when isCapacitorNative()
-  // is true).
-  const mod = await import('../lib/capacitor-bluetooth-le.js');
+  // Load from esm.sh CDN. Self-hosting this plugin was attempted
+  // (lib/capacitor-bluetooth-le.js, bundled with esbuild) but the
+  // bundle inlines its own copy of @capacitor/core, which creates
+  // a second Capacitor plugin registry that doesn't connect to
+  // the native bridge the Capacitor shell set up. The result is
+  // an unstable BLE connection that drops within seconds.
+  //
+  // The esm.sh path works because esm.sh resolves @capacitor/core
+  // as an external that hooks into the existing window.Capacitor
+  // bridge. This import only runs inside the Capacitor APK on the
+  // first BLE connect — the web build never reaches this code
+  // because app.js gates BleNativeTransport behind
+  // isCapacitorNative(). Network access is available inside the
+  // APK (map tiles, etc.), and the plugin JS is cached by the
+  // WebView after the first load.
+  const mod = await import('https://esm.sh/@capacitor-community/bluetooth-le@6.1.0');
   _BleClient = mod.BleClient;
   if (!_BleClient) throw new Error('BleClient not found in plugin module');
   return _BleClient;
