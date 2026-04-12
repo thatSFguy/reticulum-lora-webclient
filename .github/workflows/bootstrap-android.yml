@@ -54,14 +54,30 @@ jobs:
       - name: Patch build.gradle for env-driven signing
         run: |
           python - <<'PY'
+          import re
           from pathlib import Path
           path = Path("android/app/build.gradle")
           gradle = path.read_text()
 
-          # Insert a signingConfigs block right after the opening of
-          # `android {` — Capacitor's default build.gradle does not
-          # include one, so the release build would otherwise be
-          # unsigned.
+          # Wire `signingConfig signingConfigs.release` into the
+          # buildTypes.release block FIRST, before we inject our own
+          # signingConfigs block higher up. If we do it the other
+          # way around, a naive str.replace on "release {" matches
+          # the signingConfigs.release block we just added instead
+          # of the buildTypes.release block we want to edit.
+          br_match = re.search(
+              r'(buildTypes\s*\{\s*release\s*\{[^\n]*\n)',
+              gradle,
+          )
+          if not br_match:
+              raise SystemExit("could not find buildTypes { release { ... } block")
+          gradle = (
+              gradle[:br_match.end()]
+              + "            signingConfig signingConfigs.release\n"
+              + gradle[br_match.end():]
+          )
+
+          # Now insert the signingConfigs block right after `android {`.
           signing_block = '''
               signingConfigs {
                   release {
@@ -79,17 +95,6 @@ jobs:
           if marker not in gradle:
               raise SystemExit("could not find 'android {' block in build.gradle")
           gradle = gradle.replace(marker, marker + signing_block, 1)
-
-          # Wire the release buildType to use it. Capacitor's default
-          # release {} block only has minifyEnabled + proguardFiles.
-          release_marker = "        release {\n"
-          if release_marker not in gradle:
-              raise SystemExit("could not find 'release {' block in buildTypes")
-          gradle = gradle.replace(
-              release_marker,
-              release_marker + "            signingConfig signingConfigs.release\n",
-              1,
-          )
 
           path.write_text(gradle)
           print("Patched build.gradle with signingConfigs.release")
