@@ -530,12 +530,12 @@ let nodesMap = null;             // L.Map instance, created on first view visit
 let nodesTileLayer = null;       // active tile layer
 let nodeMarkers = new Map();     // hash_hex → L.Marker
 
-// Dynamically import Leaflet from esm.sh on first use. On a box with
-// no internet this will reject; callers swallow that so the list still
-// works and the map container just stays as the placeholder.
+// Dynamically import Leaflet from the self-hosted bundle on first use.
+// On a box where the file can't load this will reject; callers swallow
+// that so the list still works and the map stays as the placeholder.
 async function ensureLeaflet() {
   if (leafletLib) return leafletLib;
-  const mod = await import('https://esm.sh/leaflet@1.9.4');
+  const mod = await import('../lib/leaflet.js');
   leafletLib = mod.default || mod;
   return leafletLib;
 }

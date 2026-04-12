@@ -8,7 +8,7 @@
 // Same public shape as BleTransport so rnode.js can swap them in
 // without touching anything above the transport layer.
 //
-// The plugin's JavaScript shim is dynamically imported from esm.sh
+// The plugin's JavaScript shim is dynamically imported from a local
 // on first use. That means the browser/web builds never download
 // it, and the APK builds get it once it's pulled into the WebView
 // context on the first Connect (BLE) click.
@@ -23,14 +23,16 @@ let _BleClient = null;
 
 async function getBleClient() {
   if (_BleClient) return _BleClient;
-  // TODO: Supply-chain risk — this is still loaded from a third-party
-  // CDN without integrity verification. Self-hosting is non-trivial
-  // because the plugin's JS shim imports @capacitor/core, which
-  // itself has deep dependencies. For APK builds the plugin is
-  // installed via npm and synced by Capacitor, so the CDN is only
-  // hit when running in a plain browser (where native BLE won't work
-  // anyway). Revisit if Capacitor adds a pre-bundled ESM export.
-  const mod = await import('https://esm.sh/@capacitor-community/bluetooth-le@6.1.0');
+  // Self-hosted bundle with @capacitor/core inlined. At runtime
+  // inside the Capacitor WebView, the inlined core discovers the
+  // native bridge via window.Capacitor (injected by the native
+  // shell on APK startup). In a plain browser where window.
+  // Capacitor does not exist, the plugin falls back to its Web
+  // Bluetooth implementation (which is equivalent to our regular
+  // BleTransport and never actually gets called because app.js
+  // only routes to BleNativeTransport when isCapacitorNative()
+  // is true).
+  const mod = await import('../lib/capacitor-bluetooth-le.js');
   _BleClient = mod.BleClient;
   if (!_BleClient) throw new Error('BleClient not found in plugin module');
   return _BleClient;

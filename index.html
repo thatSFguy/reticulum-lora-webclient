@@ -17,12 +17,9 @@
   } catch (e) {}
 </script>
 <link rel="stylesheet" href="css/style.css">
-<!-- Leaflet CSS for the Nodes view map. Loaded unconditionally so
-     styles are ready when the map is lazy-initialised on first visit.
-     Leaflet JavaScript itself is imported on demand in js/app.js. -->
-<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
-      integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
-      crossorigin="">
+<!-- Leaflet CSS for the Nodes view map. Self-hosted alongside the
+     JS bundle in lib/ so no CDN request is made. -->
+<link rel="stylesheet" href="lib/leaflet.css">
 </head>
 <body>
 
@@ -499,7 +496,7 @@
 
 </div>
 
-<!-- Import map: resolve bare specifiers to esm.sh CDN -->
+<!-- Import map: resolve bare specifiers to self-hosted bundles in lib/ -->
 <script type="importmap">
 {
   "imports": {
