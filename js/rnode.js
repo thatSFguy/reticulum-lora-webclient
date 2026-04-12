@@ -83,7 +83,7 @@ export class RNode {
     await this.transport.write(frame);
   }
 
-  async _sendAndWait(cmd, data = new Uint8Array(0), responseCmd, timeoutMs = 3000) {
+  async _sendAndWait(cmd, data = new Uint8Array(0), responseCmd, timeoutMs = 10000) {
     if (responseCmd === undefined) responseCmd = cmd;
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
