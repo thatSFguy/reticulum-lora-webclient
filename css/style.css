@@ -114,6 +114,7 @@ a { color: var(--accent); }
 .app-shell {
   display: flex;
   height: 100vh;
+  height: 100dvh;   /* dynamic viewport height — excludes the mobile browser URL bar */
   width: 100%;
   overflow: hidden;
 }
@@ -423,6 +424,7 @@ a { color: var(--accent); }
   flex: 1;
   display: none;
   min-width: 0;
+  min-height: 0;    /* flex column items default to min-height:auto which breaks scroll */
   overflow: hidden;
 }
 .view.active { display: flex; }
@@ -454,6 +456,7 @@ a { color: var(--accent); }
 
 .view-messages {
   flex-direction: row;
+  min-height: 0;
   background: var(--surface-2);
 }
 [data-theme="dark"] .view-messages { background: var(--bg); }
@@ -585,6 +588,8 @@ a { color: var(--accent); }
   display: flex;
   flex-direction: column;
   min-width: 0;
+  min-height: 0;    /* prevent content from growing this container past its flex allocation */
+  overflow: hidden;  /* establish a formatting context so children scroll, not this */
   background: var(--surface-2);
 }
 [data-theme="dark"] .chat-area { background: var(--surface); }

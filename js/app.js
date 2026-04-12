@@ -1813,8 +1813,18 @@ $('btn-back')?.addEventListener('click', () => {
   renderContactList();
 });
 
-// Reflect display-name edits into avatars and sidebar/right panel labels.
-$('my-name')?.addEventListener('input', updateAvatars);
+// Persist display name across sessions. Restore from localStorage on
+// load so the user doesn't have to re-type it after every page reload,
+// and save on every keystroke so it's always up to date.
+const NAME_KEY = 'reticulum-display-name';
+const savedName = localStorage.getItem(NAME_KEY);
+if (savedName && $('my-name')) {
+  $('my-name').value = savedName;
+}
+$('my-name')?.addEventListener('input', () => {
+  localStorage.setItem(NAME_KEY, $('my-name').value);
+  updateAvatars();
+});
 
 // Mobile scroll hint: shown by CSS on narrow viewports. Dismiss on
 // first scroll (user has seen it and acted on it) or after 6 seconds
