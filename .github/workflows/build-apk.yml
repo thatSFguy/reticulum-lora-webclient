@@ -80,6 +80,52 @@ jobs:
       - name: Stage web assets
         run: bash tools/stage_site.sh
 
+      - name: Stamp version + commit SHA into www/index.html
+        # Rewrites the hardcoded v0.x.y baseline in the version
+        # badges to the tag-derived version and replaces every
+        # <!-- BUILD_SHA --> marker with a clickable SHA link,
+        # mirroring what deploy.yml does for the Pages build. Runs
+        # after stage (so it edits the copy in www/, not the
+        # committed index.html) and before `cap sync` (so Capacitor
+        # copies the stamped file into the Android assets dir).
+        env:
+          SHA_FULL: ${{ github.sha }}
+          REPO:     ${{ github.repository }}
+          VERSION:  ${{ steps.version.outputs.version }}
+        run: |
+          python - <<'PY'
+          import os, re
+          from pathlib import Path
+
+          sha_full  = os.environ['SHA_FULL']
+          repo      = os.environ['REPO']
+          version   = os.environ['VERSION']
+          sha_short = sha_full[:7]
+          sha_url   = f"https://github.com/{repo}/commit/{sha_full}"
+
+          path = Path("www/index.html")
+          html = path.read_text(encoding='utf-8')
+
+          # Bump every v#.#.# immediately preceding a BUILD_SHA
+          # marker to the tag-derived version. Both the sidebar
+          # logo badge and the About card version use the same
+          # "v0.3.0<!-- BUILD_SHA -->" pattern, so one regex
+          # handles both.
+          html, n_ver = re.subn(
+              r'v\d+\.\d+\.\d+(?=<!-- BUILD_SHA -->)',
+              f'v{version}',
+              html,
+          )
+          print(f"Rewrote {n_ver} version badge(s) to v{version}")
+
+          # Stamp every BUILD_SHA marker with a link to the commit.
+          replacement = f' <a class="version-sha" href="{sha_url}" target="_blank" rel="noopener" title="Commit this build was deployed from">{sha_short}</a>'
+          html = html.replace('<!-- BUILD_SHA -->', replacement)
+
+          path.write_text(html, encoding='utf-8')
+          print(f"Stamped v{version} · {sha_short} -> {sha_url}")
+          PY
+
       - name: Sync Capacitor Android
         run: npx cap sync android
 
