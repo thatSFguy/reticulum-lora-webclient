@@ -1292,9 +1292,11 @@ async function outboundRetryTick() {
 // found, mark the row as delivered.
 async function handleDeliveryProof(pkt) {
   const hashHex = toHex(pkt.destHash);
+  log('info', `  Opportunistic PROOF arrived, dest=${hashHex}`);
   const rows = await getAllMessages();
-  for (const row of rows) {
-    if (row.direction !== 'outgoing') continue;
+  const outgoing = rows.filter(r => r.direction === 'outgoing' && r.packetHash);
+  log('info', `  Checking ${outgoing.length} outbound row(s) with stored packetHash`);
+  for (const row of outgoing) {
     if (row.packetHash !== hashHex) continue;
     if (row.state === MSG_STATE_DELIVERED) return;
     await updateMessage(row.id, { state: MSG_STATE_DELIVERED });
@@ -1305,6 +1307,9 @@ async function handleDeliveryProof(pkt) {
     }
     return;
   }
+  // No match — log the most recent outbound hashes so we can diff.
+  const recent = outgoing.slice(-3).map(r => r.packetHash).join(', ');
+  log('info', `  No outbound row matches. Recent packetHashes: ${recent || '(none)'}`);
 }
 
 // ---- Send announce ---------------------------------------------------
