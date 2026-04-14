@@ -41,6 +41,32 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Sync version badge from package.json
+        # Single source of truth for the semantic version is package.json.
+        # This step rewrites the two "v?.?.?" tokens that immediately
+        # precede the <!-- BUILD_SHA --> markers in index.html to match.
+        # Means future version bumps only need to touch package.json.
+        run: |
+          python - <<'PY'
+          import json, re
+          version = json.load(open('package.json'))['version']
+          print(f"Syncing version badge to v{version}")
+          with open('index.html', 'r', encoding='utf-8') as f:
+              html = f.read()
+          # Rewrite any >v1.2.3<!-- BUILD_SHA --> → >v{version}<!-- BUILD_SHA -->
+          new_html, n = re.subn(
+              r'>v\d+\.\d+\.\d+(<!-- BUILD_SHA -->)',
+              lambda m: f'>v{version}{m.group(1)}',
+              html
+          )
+          if n == 0:
+              print('WARNING: no version badge tokens found in index.html')
+          else:
+              print(f'Rewrote {n} version badge(s)')
+          with open('index.html', 'w', encoding='utf-8') as f:
+              f.write(new_html)
+          PY
+
       - name: Inject short commit SHA into version badge
         # Replaces the <!-- BUILD_SHA --> comment placeholder in the
         # version badge with a clickable link to the commit. Locally
