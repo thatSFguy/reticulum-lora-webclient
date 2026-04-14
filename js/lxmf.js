@@ -46,18 +46,41 @@ export async function unpackMessage(data, destHash) {
   const fields    = payload[3] || {};
   const stamp     = payload.length > 4 ? payload[4] : null;
 
-  // Upstream LXMF computes the signature hash over a re-encoded msgpack
-  // containing only the first four elements of the payload (the stamp,
-  // if present, is explicitly excluded). We build two candidate hashes:
-  // one over a re-encoded stamp-stripped payload, and one over the raw
-  // on-wire msgpack bytes as a fallback. verifyMessageSignature will
-  // try both because some upstream builds append the stamp as a
-  // trailing blob AFTER the msgpack instead of as a 5th array element,
-  // and the byte-level re-encode can also drift if our msgpack encoder
-  // chooses a different numeric width than the sender's.
+  // Upstream LXMF signs over msgpack.packb([timestamp, title, content,
+  // fields]) — the 4-element payload WITHOUT the stamp — using Python's
+  // u-msgpack-python. Re-encoding those 4 elements in JS via
+  // @msgpack/msgpack rarely produces byte-identical output: Python
+  // preserves dict insertion order, picks bin/str types based on
+  // sender-side encoding decisions, and may widen ints/floats
+  // differently than our JS encoder. So we compute the "canonical"
+  // 4-element msgpack by PATCHING the on-wire 5-element bytes: flip
+  // the fixarray header from 0x95 to 0x94, and strip the trailing
+  // stamp bytes. That preserves the sender's exact byte encoding of
+  // the first four elements — which is what was actually signed.
+  let hashedPrefix = null;
+  let hashPrefix   = null;
+  if (payload.length === 5 && msgpackData.length > 1 && msgpackData[0] === 0x95) {
+    const stampEncoded = new Uint8Array(msgpackEncode(payload[4]));
+    const prefixLen = msgpackData.length - stampEncoded.length;
+    if (prefixLen > 1 && prefixLen <= msgpackData.length) {
+      const prefix = new Uint8Array(prefixLen);
+      prefix.set(msgpackData.subarray(0, prefixLen));
+      prefix[0] = 0x94;  // fixarray-4
+      hashedPrefix = concatBytes([destHash, sourceHash, prefix]);
+      hashPrefix   = await sha256(hashedPrefix);
+    }
+  }
+
+  // Fallback: re-encode the 4-element payload in JS. Works when the
+  // sender's msgpack encoding happens to match ours (typically simple
+  // payloads with no fields dict).
   const strippedMsgpack = new Uint8Array(msgpackEncode([timestamp, payload[1], payload[2], fields]));
   const hashedStripped = concatBytes([destHash, sourceHash, strippedMsgpack]);
   const hashStripped   = await sha256(hashedStripped);
+
+  // Fallback: sign over the raw on-wire msgpack. Handles unusual
+  // sender builds where the stamp was appended as a separate blob
+  // after a 4-element array rather than being packed as element 5.
   const hashedOriginal = concatBytes([destHash, sourceHash, msgpackData]);
   const hashOriginal   = await sha256(hashedOriginal);
 
@@ -71,11 +94,14 @@ export async function unpackMessage(data, destHash) {
     stamp,
     destHash,
     msgpackData,
-    // Primary hashedPart / messageHash preserve the old field names so
-    // verifyMessageSignature's first-pass call still works.
+    // Primary = wire-prefix-patched 4-element msgpack (if available, else
+    // re-encoded). verifyMessageSignature tries prefix first when set.
     hashedPart: hashedStripped,
     messageHash: hashStripped,
     msgpackForHash: strippedMsgpack,
+    // Preferred view: byte-identical 4-element prefix extracted from wire.
+    hashedPartPrefix: hashedPrefix,
+    messageHashPrefix: hashPrefix,
     // Fallback view for the "no stamp stripping" variant.
     hashedPartOriginal: hashedOriginal,
     messageHashOriginal: hashOriginal,
@@ -106,6 +132,15 @@ export async function unpackLinkMessage(data) {
 // raw on-wire msgpack bytes. Returns an object describing which
 // variant matched, or {ok: false} if neither did.
 export function verifyMessageSignature(message, senderIdentity) {
+  // Try the wire-prefix-patched view first — this is what upstream LXMF
+  // signs and it preserves byte-for-byte compatibility with the sender's
+  // msgpack encoding (no re-encoding drift).
+  if (message.hashedPartPrefix && message.messageHashPrefix) {
+    const prefixSigned = concatBytes([message.hashedPartPrefix, message.messageHashPrefix]);
+    if (senderIdentity.verify(message.signature, prefixSigned)) {
+      return { ok: true, variant: 'prefix' };
+    }
+  }
   const strippedSigned = concatBytes([message.hashedPart, message.messageHash]);
   if (senderIdentity.verify(message.signature, strippedSigned)) {
     return { ok: true, variant: 'stripped' };
