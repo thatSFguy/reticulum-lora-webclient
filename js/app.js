@@ -1240,10 +1240,17 @@ async function doOutboundSend(id) {
     await rnode.sendPacket(packet);
     log('ok', `Sent ${packet.length}B to "${label}"`);
 
-    const backoffIndex = Math.min(attemptNumber - 1, MSG_BACKOFF_MS.length - 1);
+    // Transition to SENT and stop retrying. Opportunistic LXMF
+    // destinations (Sideband, MeshChat, NomadNet) do NOT send
+    // Packet-level delivery proofs — upstream Reticulum only
+    // auto-proves destinations configured with PROVE_ALL, which
+    // LXMF does not set. Retrying based on missing proofs would
+    // endlessly resend a message that was actually delivered.
+    // If a proof DOES arrive (rare, destination-specific), the
+    // handleDeliveryProof path upgrades state to DELIVERED.
     await updateMessage(id, {
       state: MSG_STATE_SENT,
-      nextRetryAt: Date.now() + MSG_BACKOFF_MS[backoffIndex],
+      nextRetryAt: 0,
       lastError: null,
     });
   } catch (e) {
@@ -1282,16 +1289,11 @@ async function outboundRetryTick() {
       continue;
     }
 
-    if (row.state === MSG_STATE_SENT && row.nextRetryAt && now >= row.nextRetryAt) {
-      if ((row.attempts || 0) >= MSG_MAX_ATTEMPTS) {
-        await updateMessage(row.id, { state: MSG_STATE_FAILED });
-        if (activeContactHash === row.contactHash) {
-          await renderMessages(activeContactHash);
-        }
-      } else {
-        await doOutboundSend(row.id);
-      }
-    }
+    // Previously we would retransmit SENT rows whose proof timeout
+    // fired. That produced endless duplicates for LXMF destinations
+    // that never send opportunistic proofs (Sideband et al). SENT is
+    // now a terminal state unless the retry path fails — only PENDING
+    // rows are retried here.
   }
 }
 
