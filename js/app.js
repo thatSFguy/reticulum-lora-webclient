@@ -677,7 +677,17 @@ async function handleData(pkt, rxInfo) {
     const msg = await unpackMessage(plaintext, myDestHash);
     await dispatchIncomingMessage(msg, rxInfo);
   } catch (e) {
+    // On HMAC failure, log enough context to diagnose a stale-cache
+    // scenario: the sender's ephemeral pubkey (visible on the wire)
+    // plus the first bytes of OUR current pubkeys so the user can
+    // tell if Sideband encrypted to a ratchet we no longer have.
+    const ephPubHex = pkt.payload.length >= 32 ? toHex(pkt.payload.subarray(0, 32)).substring(0, 16) : '(short)';
+    const ratchetPubPrefix = myIdentity.ratchetPubKey ? toHex(myIdentity.ratchetPubKey).substring(0, 16) : '(none)';
+    const encPubPrefix = myIdentity.encPubKey ? toHex(myIdentity.encPubKey).substring(0, 16) : '(none)';
     log('err', `  Decrypt/parse failed: ${e.message}`);
+    log('info', `    sender eph pub: ${ephPubHex}...`);
+    log('info', `    our ratchet pub: ${ratchetPubPrefix}... enc pub: ${encPubPrefix}...`);
+    log('info', `    tried ${candidatePrivs.length} key(s). If sender has a stale contact, send an announce and ask them to retry.`);
   }
 }
 
