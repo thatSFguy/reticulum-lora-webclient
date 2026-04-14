@@ -676,6 +676,33 @@ async function handleData(pkt, rxInfo) {
     const plaintext = await decrypt(pkt.payload, candidatePrivs, myIdentity.hash);
     const msg = await unpackMessage(plaintext, myDestHash);
     await dispatchIncomingMessage(msg, rxInfo);
+
+    // Send opportunistic delivery PROOF back so the sender (Sideband) sees
+    // the message as delivered and stops retransmitting. Upstream RNS
+    // Packet.prove() for opportunistic delivery builds a PROOF packet
+    // whose destHash is the first 16 bytes of the received packet's
+    // full SHA-256 hash, and whose payload is an Ed25519 signature over
+    // that full 32-byte hash (signed with our long-term identity
+    // signing key so the sender can verify against the sig_pub from
+    // our announce). We send on every successful decrypt — even for
+    // dupes — because the sender keeps retransmitting until it sees
+    // its own packet's proof come back.
+    try {
+      const packetHash  = await computePacketFullHash(pkt);
+      const signature   = ed25519.sign(packetHash, myIdentity.sigPrivKey);
+      const proofPacket = buildPacket({
+        headerType: HEADER_1,
+        destType:   DEST_SINGLE,
+        packetType: PACKET_PROOF,
+        destHash:   packetHash.subarray(0, 16),
+        context:    0x00,
+        payload:    signature,
+      });
+      await rnode.sendPacket(proofPacket);
+      log('info', `  Opportunistic PROOF sent, dest=${toHex(packetHash.subarray(0, 16))}`);
+    } catch (e) {
+      log('info', `  Proof send failed: ${e.message}`);
+    }
   } catch (e) {
     // On HMAC failure, log enough context to diagnose a stale-cache
     // scenario: the sender's ephemeral pubkey (visible on the wire)
