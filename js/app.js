@@ -742,8 +742,7 @@ function messageDedupeKey(sourceHashHex, content, timestamp) {
 // initialise the AudioContext on first use — by that time the
 // user has already clicked Connect, which satisfies the user-
 // gesture requirement. Also buzzes the phone briefly when the
-// Vibration API is present (mobile browsers and the Capacitor
-// WebView).
+// Vibration API is present (mobile browsers).
 let _audioCtx = null;
 function playMessageBeep() {
   try {
@@ -1662,15 +1661,6 @@ function setConnectButtonsHidden(hidden) {
   });
 }
 
-// Detect whether the app is running inside a Capacitor native shell
-// (the Android APK). Used to swap the BLE transport from Web
-// Bluetooth to the @capacitor-community/bluetooth-le native plugin,
-// because Chromium's System WebView does not expose navigator.
-// bluetooth.
-function isCapacitorNative() {
-  return !!(window.Capacitor && typeof window.Capacitor.isNativePlatform === 'function' && window.Capacitor.isNativePlatform());
-}
-
 // Show or remove the ws:// security warning banner. If the user
 // connects to a remote host over unencrypted ws:// (as opposed to
 // wss:// or localhost), a notice is injected at the top of the
@@ -1706,17 +1696,11 @@ async function connect(transportType) {
     // Pick the right interface based on transport type.
     //   'ble' / 'serial' → RNode-over-KISS (owns a radio)
     //   'ws'             → rnsd-over-HDLC (no radio, direct to a Reticulum daemon)
-    //
-    // On Android APK builds, 'ble' is transparently routed to the
-    // native BLE plugin instead of Web Bluetooth.
     if (transportType === 'ws') {
       const url = ($('ws-url').value || '').trim();
       if (!url) { log('err', 'WebSocket URL is empty'); return; }
       rnode = new RnsdInterface(url);
       checkWsSecurityWarning(url);
-    } else if (transportType === 'ble' && isCapacitorNative()) {
-      log('info', 'Using native BLE transport (Capacitor)');
-      rnode = new RNode('ble-native');
     } else {
       rnode = new RNode(transportType);
     }
@@ -1890,15 +1874,10 @@ function disableTransport(name, label) {
     if (b.id) b.textContent = label;  // only the settings button has the long label
   });
 }
-// Inside the Capacitor APK, navigator.bluetooth is undefined but BLE
-// still works via the native plugin, so the BLE button must stay
-// enabled. Only disable it in real browsers that lack Web Bluetooth.
-if (!navigator.bluetooth && !isCapacitorNative()) {
-  disableTransport('ble', 'Connect (BLE — not supported)');
-}
+if (!navigator.bluetooth) disableTransport('ble', 'Connect (BLE — not supported)');
 if (!navigator.serial) disableTransport('serial', 'Connect (Serial — not supported)');
 if (typeof WebSocket === 'undefined') disableTransport('ws', 'Connect (WebSocket — not supported)');
-if (!navigator.bluetooth && !navigator.serial && typeof WebSocket === 'undefined' && !isCapacitorNative()) {
+if (!navigator.bluetooth && !navigator.serial && typeof WebSocket === 'undefined') {
   $('unsupported').classList.remove('hidden');
 }
 

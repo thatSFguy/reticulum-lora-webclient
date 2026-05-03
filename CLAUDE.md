@@ -12,8 +12,6 @@ This file provides guidance to Claude Code when working with code in this reposi
 
 CI (`.github/workflows/deploy.yml`) syncs the version badge in `index.html` from `package.json` on every deploy, so only `package.json` needs editing — don't hand-edit the `v?.?.?` tokens in HTML.
 
-The Android APK uses an independent `android-v*` tag series. When changes need to ship to the APK, pick the next unused number in the existing sequence (`git tag -l 'android-v*' | sort -V | tail -1`) and push the tag; the `build-apk.yml` workflow fires on tag push only.
-
 ## Project Overview
 
 Reticulum-lite web client — a static JavaScript web app that connects to an RNode LoRa modem over Web Bluetooth and exchanges encrypted messages with Sideband/NomadNet users on a Reticulum LoRa network.
