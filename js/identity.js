@@ -23,8 +23,12 @@ export class Identity {
     this.encPubKey = null;        // X25519 public key  (32 bytes)
     this.sigPrivKey = null;       // Ed25519 private key (32 bytes)
     this.sigPubKey = null;        // Ed25519 public key  (32 bytes)
-    this.ratchetPrivKey = null;   // X25519 private key (32 bytes) — ratchet
-    this.ratchetPubKey = null;    // X25519 public key  (32 bytes)
+    this.ratchetPrivKey = null;         // X25519 private key (32 bytes) — current ratchet
+    this.ratchetPubKey = null;          // X25519 public key  (32 bytes)
+    this.previousRatchetPrivKey = null; // X25519 private key (32 bytes) — last ratchet, kept
+                                        // in memory for the brief in-flight window between
+                                        // rotation and peers seeing the new announce. Not
+                                        // persisted; minimal 1-deep ring per SPEC §7.4.
     this.publicKey = null;        // Combined: encPub(32) + sigPub(32) = 64 bytes
     this.hash = null;             // Identity hash: SHA-256(publicKey)[0:16]
   }
@@ -70,6 +74,21 @@ export class Identity {
   // identity keys. Used by the one-time migration that upgrades an
   // existing identity on first load under a ratchet-aware client.
   generateRatchet() {
+    this.ratchetPrivKey = x25519.utils.randomPrivateKey();
+    this.ratchetPubKey = x25519.getPublicKey(this.ratchetPrivKey);
+  }
+
+  // Rotate the ratchet: move the current ratchet privkey into the
+  // 1-deep "previous" slot, then generate a fresh ratchet. Long-term
+  // enc/sig keys, identity_hash and destination_hash are untouched
+  // so peers don't have to re-add us. Required per SPEC §7.3 — most
+  // transit nodes dedupe announces on (destination_hash, ratchet_pub),
+  // so a ratchet that never rotates makes every announce after the
+  // first one in a session look like a duplicate and get dropped.
+  rotateRatchet() {
+    if (this.ratchetPrivKey) {
+      this.previousRatchetPrivKey = this.ratchetPrivKey;
+    }
     this.ratchetPrivKey = x25519.utils.randomPrivateKey();
     this.ratchetPubKey = x25519.getPublicKey(this.ratchetPrivKey);
   }

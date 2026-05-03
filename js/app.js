@@ -6,7 +6,7 @@ import { encode as msgpackEncode } from '@msgpack/msgpack';
 import { RNode } from './rnode.js';
 import { RnsdInterface } from './rnsd-interface.js';
 import { toHex } from './kiss.js';
-import { Identity, computeDestinationHash, computeNameHash } from './identity.js';
+import { Identity, computeDestinationHash, computeNameHash, truncatedHash } from './identity.js';
 import { parsePacket, buildPacket, PACKET_ANNOUNCE, PACKET_DATA, PACKET_LINKREQ, PACKET_PROOF, DEST_SINGLE, DEST_LINK, HEADER_1, PACKET_TYPE_NAMES } from './reticulum.js';
 import { parseAnnounce, validateAnnounce, buildAnnounce, extractDisplayName, concatBytes, arraysEqual } from './announce.js';
 import { encrypt, decrypt } from './crypto.js';
@@ -16,11 +16,12 @@ import { lookupDestination } from './known-destinations.js';
 import { ed25519 } from '@noble/curves/ed25519';
 
 // Reticulum packet context values relevant to link traffic
-const CTX_NONE      = 0x00;
-const CTX_KEEPALIVE = 0xFA;
-const CTX_LINKCLOSE = 0xFC;
-const CTX_LRRTT     = 0xFE;
-const CTX_LRPROOF   = 0xFF;
+const CTX_NONE          = 0x00;
+const CTX_PATH_RESPONSE = 0x0B;
+const CTX_KEEPALIVE     = 0xFA;
+const CTX_LINKCLOSE     = 0xFC;
+const CTX_LRRTT         = 0xFE;
+const CTX_LRPROOF       = 0xFF;
 
 // Outbound message state machine. A row in IndexedDB with
 // direction='outgoing' transitions through these states as the
@@ -107,6 +108,10 @@ let radioOn = false;
 let links = new Map();     // hex link_id → Link instance (responder / incoming)
 let initiatorLinks = new Map();  // hex link_id → { link, contact, resolve, reject, timer }
 let lxmfNameHash = null;   // SHA256("lxmf.delivery")[:10], cached
+let pathRequestDest = null;       // 16-byte dest hash of rnstransport.path.request (PLAIN dest)
+const pathRequestDedup = new Set(); // "targetHex|tagHex" entries; bounded FIFO
+const PATH_REQUEST_DEDUP_MAX = 256; // Cap on the dedup table; upstream caps at 32000 but a
+                                    // leaf only sees requests for itself, so a small ring is fine
 let announceTimer = null;  // setInterval handle for the periodic announce
 let outboundRetryTimer = null;  // setInterval handle for the outbound retry tick
 
@@ -146,6 +151,13 @@ async function initIdentity() {
 
   myDestHash = await computeDestinationHash('lxmf.delivery', myIdentity.hash);
   lxmfNameHash = await computeNameHash('lxmf.delivery');
+  // PLAIN destination hash = SHA256(name_hash)[:16]. The well-known
+  // value is 6b9f66014d9853faab220fba47d02761; peers send path? queries
+  // here when they want to discover us. SPEC §7.2 requires every node
+  // (incl. leaves) that owns the requested target to respond with a
+  // path-response announce, otherwise peers can't message us once
+  // their cached path expires.
+  pathRequestDest = await truncatedHash(await computeNameHash('rnstransport.path.request'));
   setMyAddress(toHex(myDestHash));
   log('info', `LXMF address: ${toHex(myDestHash)}`);
 
@@ -265,7 +277,18 @@ async function handleAnnounce(pkt, rssi) {
     return;
   }
 
-  const displayName = extractDisplayName(announce.appData) || idHash.substring(0, 8);
+  // Display-name preservation. Minimal re-announces (no app_data, common
+  // when relays trim or when bots auto-re-announce after handling a
+  // message) carry no display name in the announce body, so the
+  // extracted value is null. If we just fell straight through to the
+  // idHash-prefix fallback we'd clobber a previously-saved real name
+  // ("ratdeck1") with a hex prefix on every minimal re-announce, then
+  // restore it on the next fat announce — visible UI churn.
+  // Priority: extracted > existing > idHashPrefix.
+  const extracted = extractDisplayName(announce.appData);
+  const destHashHexForExisting = toHex(announce.destHash || pkt.destHash);
+  const existing = contacts.get(destHashHexForExisting)?.displayName;
+  const displayName = extracted || existing || idHash.substring(0, 8);
 
   // Skip our own announce (rebroadcast by relay/repeater)
   if (myIdentity && idHash === toHex(myIdentity.hash)) {
@@ -659,6 +682,14 @@ function focusNodeOnMap(hash) {
 // ---- Data packet handling (incoming messages) -------------------------
 
 async function handleData(pkt, rxInfo) {
+  // Path-request DATA addressed to the well-known rnstransport.path.request
+  // PLAIN destination — handle before the addressed-to-us check, since the
+  // dest hash is the path-request service, not our LXMF address.
+  if (pathRequestDest && arraysEqual(pkt.destHash, pathRequestDest)) {
+    await handlePathRequest(pkt);
+    return;
+  }
+
   const incomingHex = toHex(pkt.destHash);
   const ourHex = myDestHash ? toHex(myDestHash) : '(none)';
   const matches = myDestHash && arraysEqual(pkt.destHash, myDestHash);
@@ -672,7 +703,16 @@ async function handleData(pkt, rxInfo) {
   log('info', '  Packet addressed to us — attempting decrypt...');
 
   try {
-    const candidatePrivs = [myIdentity.ratchetPrivKey, myIdentity.encPrivKey].filter(Boolean);
+    // Try current ratchet, then the previous one (in-memory 1-deep
+    // ring per SPEC §7.4 — covers messages already encrypted to the
+    // outgoing ratchet by senders that haven't seen the new announce
+    // yet), then the long-term identity X25519 key as the ultimate
+    // fallback for senders that have no ratchet cached at all.
+    const candidatePrivs = [
+      myIdentity.ratchetPrivKey,
+      myIdentity.previousRatchetPrivKey,
+      myIdentity.encPrivKey,
+    ].filter(Boolean);
     const plaintext = await decrypt(pkt.payload, candidatePrivs, myIdentity.hash);
     const msg = await unpackMessage(plaintext, myDestHash);
     await dispatchIncomingMessage(msg, rxInfo);
@@ -716,6 +756,67 @@ async function handleData(pkt, rxInfo) {
     log('info', `    our ratchet pub: ${ratchetPubPrefix}... enc pub: ${encPubPrefix}...`);
     log('info', `    tried ${candidatePrivs.length} key(s). If sender has a stale contact, send an announce and ask them to retry.`);
   }
+}
+
+// Path-request handler. Implements the minimum-leaf responsibility
+// from SPEC §7.2.6 (verified against RNS 1.2.0 by upstream
+// tools/verify_path_request.py):
+//
+//   1. Parse target_dest_hash + tag from the payload.
+//   2. Drop tagless requests (upstream RNS logs and discards).
+//   3. Drop duplicates via a (target || tag) dedup table — without
+//      this we'd re-respond on every retransmit and storm the mesh.
+//   4. If the target matches one of our destinations, emit a
+//      path-response announce on the receiving interface.
+//   5. Otherwise drop — leaves don't relay path? requests for
+//      destinations they don't OWN.
+//
+// Payload layout (§7.2.1):
+//   data[0:16]   target_dest_hash (mandatory)
+//   leaf form (len == 32):     data[16:32] = tag
+//   transport form (len > 32): data[16:32] = transport_id, data[32:48] = tag
+async function handlePathRequest(pkt) {
+  if (pkt.payload.length < 17) {
+    // 16B target + at least 1B tag is the minimum acceptable shape.
+    log('info', '  path? rx — tagless or short payload, dropped per §7.2.1');
+    return;
+  }
+  const target = pkt.payload.subarray(0, 16);
+  let tag;
+  if (pkt.payload.length > 32) {
+    // Transport-originator form; skip the 16B transport_id.
+    tag = pkt.payload.subarray(32);
+  } else {
+    tag = pkt.payload.subarray(16);
+  }
+  if (tag.length === 0) {
+    log('info', '  path? rx — tagless, dropped per §7.2.1');
+    return;
+  }
+  if (tag.length > 16) tag = tag.subarray(0, 16);
+
+  const targetHex = toHex(target);
+  const tagHex = toHex(tag);
+  const dedupKey = `${targetHex}|${tagHex}`;
+
+  if (pathRequestDedup.has(dedupKey)) {
+    log('info', `  path? rx for ${targetHex.substring(0,16)}... duplicate tag, ignored`);
+    return;
+  }
+  pathRequestDedup.add(dedupKey);
+  // FIFO eviction once over cap. Set iteration is insertion order.
+  if (pathRequestDedup.size > PATH_REQUEST_DEDUP_MAX) {
+    const oldest = pathRequestDedup.values().next().value;
+    pathRequestDedup.delete(oldest);
+  }
+
+  if (!myDestHash || !arraysEqual(target, myDestHash)) {
+    log('info', `  path? rx for ${targetHex.substring(0,16)}... (not us; not a transport node — dropped)`);
+    return;
+  }
+
+  log('info', `  path? rx for us (tag=${tagHex.substring(0,16)}) — sending path-response announce`);
+  await sendAnnounce({ pathResponse: true });
 }
 
 // Recent incoming LXMF dedupe set. A single logical message can
@@ -1352,8 +1453,18 @@ async function handleDeliveryProof(pkt) {
 
 // ---- Send announce ---------------------------------------------------
 
-async function sendAnnounce() {
+async function sendAnnounce({ pathResponse = false } = {}) {
   if (!radioOn || !myIdentity) { log('err', 'Radio not on or identity not ready'); return; }
+
+  // Periodic / manual announces rotate the ratchet so transit nodes
+  // don't dedupe successive announces on (destHash, ratchet_pub) and
+  // silently drop them (SPEC §7.3). Path-response announces reuse the
+  // current ratchet so we don't burn through ratchets on bursts of
+  // path? requests.
+  if (!pathResponse) {
+    myIdentity.rotateRatchet();
+    await saveIdentity(myIdentity.exportPrivateKeys());
+  }
 
   const displayName = $('my-name').value.trim() || 'WebClient';
   // LXMF/Sideband format: msgpack([display_name_bytes, stamp_cost])
@@ -1374,12 +1485,17 @@ async function sendAnnounce() {
     destType: DEST_SINGLE,
     packetType: PACKET_ANNOUNCE,
     destHash: destHash,
-    context: 0x00,
+    // Path-response announces carry context = PATH_RESPONSE so that
+    // listeners with receive_path_responses = False (the default per
+    // SPEC §4.5 step 7) skip them at the application layer. The path
+    // table side-effect still fires either way.
+    context: pathResponse ? CTX_PATH_RESPONSE : CTX_NONE,
     payload: payload,
   });
 
   await rnode.sendPacket(packet);
-  log('ok', `Announce sent as "${displayName}" [${toHex(destHash).substring(0,12)}...]${hasRatchet ? ' (ratchet)' : ''}`);
+  const label = pathResponse ? 'Path-response announce' : 'Announce';
+  log('ok', `${label} sent as "${displayName}" [${toHex(destHash).substring(0,12)}...]${hasRatchet ? ' (ratchet)' : ''}`);
 }
 
 // ---- UI rendering ----------------------------------------------------

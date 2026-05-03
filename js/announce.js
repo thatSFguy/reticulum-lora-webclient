@@ -82,9 +82,24 @@ export async function buildAnnounce(identity, appName = 'lxmf.delivery', appData
   const nameHash = await computeNameHash(appName);
   const destHash = await computeDestinationHash(appName, identity.hash);
 
-  // Random hash (10 bytes)
+  // random_hash is 5 random bytes + 5-byte big-endian uint40 of the
+  // emission Unix timestamp. Upstream RNS reads the trailing 5 bytes
+  // via Transport.timebase_from_random_blob to make path-table merge
+  // decisions when an inbound announce carries a higher hop count
+  // (RNS/Transport.py:1700-1745, 3100-3101). Emitting 10 random bytes
+  // there gives upstream a uniformly-random "timestamp" that's almost
+  // always far-future (median ≈ year 19403), so legitimate later
+  // announces lose against the stale-but-future-timestamped ghost
+  // and our destination becomes unreachable until the path TTL
+  // expires. See reticulum-specifications SPEC.md §4.1.
   const randomHash = new Uint8Array(10);
-  crypto.getRandomValues(randomHash);
+  crypto.getRandomValues(randomHash.subarray(0, 5));
+  const ts = Math.floor(Date.now() / 1000);
+  randomHash[5] = Math.floor(ts / 0x100000000) & 0xFF;
+  randomHash[6] = (ts >>> 24) & 0xFF;
+  randomHash[7] = (ts >>> 16) & 0xFF;
+  randomHash[8] = (ts >>> 8)  & 0xFF;
+  randomHash[9] =  ts         & 0xFF;
 
   // signed_data = dest_hash + public_key + name_hash + random_hash + [ratchet] + app_data
   const signedParts = [destHash, identity.publicKey, nameHash, randomHash];
