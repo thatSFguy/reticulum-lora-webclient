@@ -67,12 +67,17 @@ jobs:
           CGO_ENABLED: '0'
         run: |
           cd tools
-          go mod download
+          # `go mod tidy` resolves go.mod against the actual imports
+          # and writes go.sum. We don't commit go.sum (the dep graph
+          # is one package), so this regenerates it on every CI run.
+          go mod tidy
           OUT="ws_bridge-${{ steps.version.outputs.version }}-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}"
           # -trimpath strips $HOME paths from the binary; -s -w drops
           # the symbol table and DWARF debug info, roughly halving
           # the binary size. Expect ~3-4 MB on amd64.
-          go build -trimpath -ldflags="-s -w" -o "../$OUT" ./ws_bridge.go
+          # Build the package (.) rather than a single file — the
+          # single-file build mode skips the module's resolved deps.
+          go build -trimpath -ldflags="-s -w" -o "../$OUT" .
           ls -la "../$OUT"
           file "../$OUT" || true
           du -h "../$OUT"
