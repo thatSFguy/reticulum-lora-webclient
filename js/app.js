@@ -357,9 +357,15 @@ async function handleAnnounce(pkt, rssi) {
   // hops by 1).
   trackPath(announce, pkt);
 
-  // Store contact
+  // Store contact. Preserve user-controlled fields (pinned) from any
+  // existing row — without this, every re-announce wipes the pin
+  // because we'd construct a fresh contact object that doesn't carry
+  // the field forward, then save it back to IDB. Don't preserve
+  // `placeholder`: receiving a real announce IS the upgrade event,
+  // so the row should drop the unannounced tag.
   const destHashBytes = announce.destHash || pkt.destHash;
   const destHashHex = toHex(destHashBytes);
+  const existingContact = contacts.get(destHashHex);
   const contact = {
     hash: destHashHex,
     identityHash: idHash,
@@ -372,6 +378,7 @@ async function handleAnnounce(pkt, rssi) {
     // identity key in sendMessage when this is null.
     ratchetPub: announce.ratchet ? Array.from(announce.ratchet) : null,
     displayName,
+    pinned: !!existingContact?.pinned,
     lastSeen: Date.now(),
     rssi,
   };
