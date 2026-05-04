@@ -1,0 +1,147 @@
+name: build-bridge
+
+# Cross-compiles tools/ws_bridge.go for Windows / Linux / macOS and
+# attaches the binaries to a GitHub release. Fires on `bridge-v*` tag
+# pushes only — never on every push to master, since the bridge ships
+# as a downloadable executable independently of the webapp's Pages
+# deploy.
+#
+# To cut a release:
+#   git tag bridge-v0.5.0 && git push origin bridge-v0.5.0
+#
+# Tag format: `bridge-v{semver}`. The workflow strips the `bridge-v`
+# prefix to derive the version that goes into the binary filenames
+# (e.g. `ws_bridge-0.5.0-windows-amd64.exe`) and the release title.
+
+on:
+  push:
+    tags: ['bridge-v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Version tag to build (bridge-v0.5.0)'
+        required: true
+        default: 'bridge-v0.5.0'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
+    runs-on: ubuntu-latest
+    strategy:
+      # Don't fail-fast: a build break on one platform shouldn't kill
+      # the other binaries — surface them all as separate red Xs.
+      fail-fast: false
+      matrix:
+        include:
+          - { goos: windows, goarch: amd64, ext: .exe }
+          - { goos: linux,   goarch: amd64, ext: ''   }
+          - { goos: darwin,  goarch: arm64, ext: ''   }
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+          # No go.sum is committed (we generate it on the fly via
+          # `go mod download`), so disable the dep cache to avoid
+          # setup-go emitting a "no go.sum found" warning. The dep
+          # graph is one package — caching saves ~1s, not worth it.
+          cache: false
+
+      - name: Extract version from tag
+        id: version
+        run: |
+          TAG="${GITHUB_REF_NAME:-${{ github.event.inputs.tag }}}"
+          VERSION="${TAG#bridge-v}"
+          echo "tag=$TAG"            >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION"    >> "$GITHUB_OUTPUT"
+          echo "Building $TAG (version=$VERSION) for ${{ matrix.goos }}/${{ matrix.goarch }}"
+
+      - name: Build binary
+        env:
+          GOOS:        ${{ matrix.goos }}
+          GOARCH:      ${{ matrix.goarch }}
+          CGO_ENABLED: '0'
+        run: |
+          cd tools
+          go mod download
+          OUT="ws_bridge-${{ steps.version.outputs.version }}-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}"
+          # -trimpath strips $HOME paths from the binary; -s -w drops
+          # the symbol table and DWARF debug info, roughly halving
+          # the binary size. Expect ~3-4 MB on amd64.
+          go build -trimpath -ldflags="-s -w" -o "../$OUT" ./ws_bridge.go
+          ls -la "../$OUT"
+          file "../$OUT" || true
+          du -h "../$OUT"
+
+      - name: Upload artifact for the release job
+        uses: actions/upload-artifact@v4
+        with:
+          name: ws_bridge-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: ws_bridge-*
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    name: Publish release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          # Each matrix job uploads under its own artifact name; flatten
+          # them all into one dist/ for the release upload.
+          merge-multiple: true
+
+      - name: Compute SHA-256 sums
+        run: |
+          cd dist
+          sha256sum ws_bridge-* > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Extract version from tag
+        id: version
+        run: |
+          TAG="${GITHUB_REF_NAME:-${{ github.event.inputs.tag }}}"
+          VERSION="${TAG#bridge-v}"
+          echo "tag=$TAG"         >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Create / update GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: WS bridge ${{ steps.version.outputs.version }}
+          generate_release_notes: true
+          files: |
+            dist/ws_bridge-*
+            dist/SHA256SUMS.txt
+          body: |
+            Self-contained Go build of the WebSocket-to-TCP bridge from
+            `tools/ws_bridge.go` (v${{ steps.version.outputs.version }}).
+            No Python, no `pip install`, no runtime dependencies.
+
+            **Pick your platform:**
+            - `ws_bridge-*-windows-amd64.exe` — Windows 10/11 64-bit
+            - `ws_bridge-*-linux-amd64`        — Linux 64-bit
+            - `ws_bridge-*-darwin-arm64`       — macOS Apple Silicon
+
+            **Run:** open a terminal in the download folder and execute
+            the binary. Defaults to listening on `ws://localhost:7878`;
+            see `--bind` and `--port` for overrides. The Reticulum
+            daemon target (`host:port`) is supplied per-connection by
+            the webapp via `?host=X&port=Y` query params, not as a CLI
+            flag — one running bridge can serve any number of webapp
+            instances against any number of different rnsds.
+
+            **Verify the download:**
+            ```
+            sha256sum -c SHA256SUMS.txt
+            ```
