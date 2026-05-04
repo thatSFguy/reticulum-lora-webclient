@@ -115,6 +115,17 @@ const PATH_REQUEST_DEDUP_MAX = 256; // Cap on the dedup table; upstream caps at 
 let announceTimer = null;  // setInterval handle for the periodic announce
 let outboundRetryTimer = null;  // setInterval handle for the outbound retry tick
 
+// Contact-list filter state. Persists across reloads via localStorage so a
+// user who pinned a few peers and toggled "Pinned only" doesn't have to
+// redo it every session. The search term is per-session only — typing
+// resets on reload, which matches the usual UX expectation for a search
+// box.
+let contactFilterPinnedOnly = (() => {
+  try { return localStorage.getItem('rlw.filterPinned') === 'true'; }
+  catch (_) { return false; }
+})();
+let contactSearchTerm = '';
+
 rnode._onLog = (msg) => log('info', msg);
 
 // ---- Identity --------------------------------------------------------
@@ -183,8 +194,15 @@ async function initIdentity() {
       purged++;
       continue;
     }
-    const identity = new Identity();
-    await identity.loadFromPublicKey(new Uint8Array(c.publicKey));
+    // Placeholder contacts (created from an inbound LXMF whose sender's
+    // announce we'd never seen) carry an empty publicKey. They survive
+    // reload because we know their LXMF dest hash, but they're not
+    // replyable until handleAnnounce upgrades them with a real key.
+    let identity = null;
+    if (c.publicKey && c.publicKey.length > 0) {
+      identity = new Identity();
+      await identity.loadFromPublicKey(new Uint8Array(c.publicKey));
+    }
     // destHash may be stored as array; fall back to decoding the hex hash field
     // for legacy records saved before destHash was persisted.
     const destHash = c.destHash ? new Uint8Array(c.destHash) : hexToBytes(c.hash);
@@ -901,14 +919,55 @@ async function dispatchIncomingMessage(msg, rxInfo) {
     if (c.identityHash === sourceHashHex || hash === sourceHashHex) {
       senderName = c.displayName;
       contactHash = hash;
-      const result = verifyMessageSignature(msg, c.identity);
-      if (result.ok) {
-        log('ok', `  Signature: valid (${result.variant})`);
+      // Skip the signature check for placeholder rows — they carry
+      // no public key yet, so verifyMessageSignature would throw.
+      // The check fires once the peer's announce upgrades the row.
+      if (c.identity) {
+        const result = verifyMessageSignature(msg, c.identity);
+        if (result.ok) {
+          log('ok', `  Signature: valid (${result.variant})`);
+        } else {
+          log('err', `  Signature: INVALID (both stripped and original failed)`);
+        }
       } else {
-        log('err', `  Signature: INVALID (both stripped and original failed)`);
+        log('info', `  Signature: skipped (placeholder contact, no public key yet)`);
       }
       break;
     }
+  }
+
+  // No matching contact — auto-create a placeholder so the sidebar
+  // surfaces the conversation. Public mesh peers commonly reach us
+  // before their announce does (we restarted, the announce got
+  // dropped on the radio, or they're propagated through a node we
+  // can't see directly). Without this row the message lands in
+  // IndexedDB and the ding fires but nothing appears in the UI.
+  // handleAnnounce will overwrite this entry with the real key
+  // material once we eventually hear from them; until then, the
+  // contact is read-only (sendMessage refuses to encrypt without a
+  // public key).
+  if (!contactHash) {
+    const placeholderName = sourceHashHex.substring(0, 8);
+    const placeholderRow = {
+      hash: sourceHashHex,
+      identityHash: null,
+      publicKey: [],   // empty signals "placeholder" to the hydrate path
+      destHash: Array.from(msg.sourceHash),
+      // We know it's an LXMF peer because the decrypt + msgpack unpack
+      // succeeded as LXMF — so the purge filter on next reload will
+      // accept this row.
+      nameHash: Array.from(lxmfNameHash),
+      ratchetPub: null,
+      displayName: placeholderName,
+      placeholder: true,
+      lastSeen: Date.now(),
+      rssi: rxInfo.rssi,
+    };
+    contacts.set(sourceHashHex, { ...placeholderRow, identity: null, destHash: msg.sourceHash });
+    await saveContact(placeholderRow);
+    contactHash = sourceHashHex;
+    senderName = placeholderName;
+    log('info', `  Created placeholder contact for unknown sender ${sourceHashHex.substring(0,16)}... (no announce seen yet — reply disabled until they announce)`);
   }
 
   const via = rxInfo.hops === 0 ? 'direct' : `${rxInfo.hops} hop${rxInfo.hops > 1 ? 's' : ''}`;
@@ -1256,6 +1315,10 @@ async function sendMessage() {
 
   const contact = contacts.get(activeContactHash);
   if (!contact) { log('err', 'Contact not found'); return; }
+  if (!contact.identity) {
+    log('err', 'Cannot reply yet — peer has not announced; their public key is unknown. Wait for their next announce, then try again.');
+    return;
+  }
 
   try {
     // Pack LXMF message. LXMF's source_hash field is the sender's
@@ -1507,22 +1570,57 @@ function renderContactList() {
     return;
   }
 
-  list.innerHTML = '';
+  // Apply pinned-only and search filters before rendering. Search
+  // matches against displayName and hash (case-insensitive substring).
+  const term = contactSearchTerm.trim().toLowerCase();
+  const rows = [];
   for (const [hash, c] of contacts) {
+    if (contactFilterPinnedOnly && !c.pinned) continue;
+    if (term) {
+      const name = (c.displayName || '').toLowerCase();
+      if (!name.includes(term) && !hash.toLowerCase().includes(term)) continue;
+    }
+    rows.push([hash, c]);
+  }
+  // Pinned rows float to the top; otherwise preserve insertion order.
+  rows.sort((a, b) => (b[1].pinned ? 1 : 0) - (a[1].pinned ? 1 : 0));
+
+  if (rows.length === 0) {
+    const msg = contactFilterPinnedOnly && contacts.size > 0
+      ? 'No pinned contacts. Click ☆ on a contact to pin it.'
+      : term
+        ? `No contacts match "${escapeHtml(contactSearchTerm)}"`
+        : 'Listening for announces…';
+    list.innerHTML = `<li class="contact-empty">${msg}</li>`;
+    return;
+  }
+
+  list.innerHTML = '';
+  for (const [hash, c] of rows) {
     const li = document.createElement('li');
     li.className = hash === activeContactHash ? 'active' : '';
 
     const unread = c.unreadCount ? ` <span class="contact-unread">${c.unreadCount}</span>` : '';
     const initials = initialsFor(c.displayName || hash);
     const shortHash = `${hash.substring(0, 8)}…${hash.substring(hash.length - 4)}`;
+    const placeholderTag = c.placeholder ? ' <span class="contact-tag">unannounced</span>' : '';
     const info = document.createElement('div');
     info.innerHTML = `
       <div class="contact-avatar">${escapeHtml(initials)}</div>
       <div style="flex:1; min-width:0">
-        <div class="contact-name">${escapeHtml(c.displayName || hash.substring(0, 8))}${unread}</div>
+        <div class="contact-name">${escapeHtml(c.displayName || hash.substring(0, 8))}${unread}${placeholderTag}</div>
         <div class="contact-hash">${shortHash}</div>
       </div>`;
     info.addEventListener('click', () => selectContact(hash));
+
+    const pin = document.createElement('button');
+    pin.className = c.pinned ? 'contact-pin-btn active' : 'contact-pin-btn';
+    pin.title = c.pinned ? 'Unpin' : 'Pin to top';
+    pin.textContent = '\u2605';   // black star \u2605
+    pin.addEventListener('click', (e) => {
+      e.stopPropagation();
+      togglePin(hash);
+    });
 
     const del = document.createElement('button');
     del.className = 'contact-delete';
@@ -1534,9 +1632,33 @@ function renderContactList() {
     });
 
     li.appendChild(info);
+    li.appendChild(pin);
     li.appendChild(del);
     list.appendChild(li);
   }
+}
+
+async function togglePin(hash) {
+  const c = contacts.get(hash);
+  if (!c) return;
+  c.pinned = !c.pinned;
+  // Persist to IDB. Strip the in-memory-only fields (Identity instance,
+  // raw byte arrays) into a plain serialisable object before writing.
+  const stored = {
+    hash: c.hash,
+    identityHash: c.identityHash,
+    publicKey: c.publicKey instanceof Uint8Array ? Array.from(c.publicKey) : (c.publicKey || []),
+    destHash: c.destHash instanceof Uint8Array ? Array.from(c.destHash) : c.destHash,
+    nameHash: c.nameHash instanceof Uint8Array ? Array.from(c.nameHash) : c.nameHash,
+    ratchetPub: c.ratchetPub instanceof Uint8Array ? Array.from(c.ratchetPub) : (c.ratchetPub || null),
+    displayName: c.displayName,
+    placeholder: !!c.placeholder,
+    pinned: c.pinned,
+    lastSeen: c.lastSeen,
+    rssi: c.rssi,
+  };
+  await saveContact(stored);
+  renderContactList();
 }
 
 async function removeContact(hash) {
@@ -1942,6 +2064,28 @@ $('btn-stop-radio').addEventListener('click', async () => {
 document.querySelectorAll('.js-announce-btn').forEach(b => {
   b.addEventListener('click', sendAnnounce);
 });
+
+// Contact filter bar — search input + pinned-only toggle. The toggle's
+// initial pressed state is restored from localStorage so the user's
+// last filter choice survives reloads.
+const _contactSearchEl = $('contact-search');
+if (_contactSearchEl) {
+  _contactSearchEl.addEventListener('input', (e) => {
+    contactSearchTerm = e.target.value || '';
+    renderContactList();
+  });
+}
+const _contactFilterPinnedEl = $('contact-filter-pinned');
+if (_contactFilterPinnedEl) {
+  _contactFilterPinnedEl.setAttribute('aria-pressed', String(contactFilterPinnedOnly));
+  _contactFilterPinnedEl.addEventListener('click', () => {
+    contactFilterPinnedOnly = !contactFilterPinnedOnly;
+    _contactFilterPinnedEl.setAttribute('aria-pressed', String(contactFilterPinnedOnly));
+    try { localStorage.setItem('rlw.filterPinned', String(contactFilterPinnedOnly)); }
+    catch (_) { /* private-mode storage refused; toggle still works for the session */ }
+    renderContactList();
+  });
+}
 $('btn-new-id').addEventListener('click', async () => {
   if (!confirm('Generate new identity? Your current address will change.')) return;
   myIdentity = new Identity();

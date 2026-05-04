@@ -99,6 +99,10 @@
           <button class="btn-secondary btn-block js-connect-btn" data-transport="serial">Connect via USB (Serial)</button>
           <p class="mobile-connect-hint">For a remote <code>rnsd</code> daemon, open Settings → Connect.</p>
         </div>
+        <div class="contact-filter">
+          <input id="contact-search" class="contact-search" type="search" placeholder="Search contacts…" autocomplete="off" />
+          <button id="contact-filter-pinned" class="filter-toggle" title="Show pinned only" aria-pressed="false">★</button>
+        </div>
         <ul class="contact-list" id="contact-list">
           <li class="contact-empty">Listening for announces…</li>
         </ul>
