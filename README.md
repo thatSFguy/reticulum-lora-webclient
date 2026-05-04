@@ -4,7 +4,7 @@ A browser-based Reticulum messaging client. Connects either directly to an [RNod
 
 **Live app:** <https://thatsfguy.github.io/reticulum-lora-webclient/>
 
-No build step, no framework, no bundler. Plain ES modules, loaded directly in the browser. The LoRa path runs entirely in the browser with no server. The TCP-via-WebSocket path requires a small Python bridge (`tools/ws_bridge.py`, 80 lines) to sit between the browser and an existing `rnsd`.
+No build step, no framework, no bundler. Plain ES modules, loaded directly in the browser. The LoRa path runs entirely in the browser with no server. The TCP-via-WebSocket path needs a small bridge process to sit between the browser and an existing `rnsd` — pick either the prebuilt Go binary (no runtime to install) or the Python script (`tools/ws_bridge.py`, 130 lines).
 
 ## What it does
 
@@ -84,8 +84,10 @@ Browsers cannot open raw TCP sockets — the security model only exposes HTTP, W
 ```
 
 - The web client builds raw Reticulum packets the same way it does for the LoRa path, but frames them in **HDLC** (`0x7E` flag, `0x7D` escape) instead of KISS before handing them to the transport.
-- `tools/ws_bridge.py` accepts WebSocket connections, opens a TCP connection to an `rnsd` running a `TCPServerInterface`, and forwards raw bytes in both directions without parsing any frames.
+- The bridge process — either the **Go binary** (`ws_bridge.exe` on Windows, `ws_bridge` on Linux/macOS, prebuilt and attached to each `bridge-v*` GitHub release) or the **Python script** (`tools/ws_bridge.py`) — accepts WebSocket connections, opens a TCP connection to an `rnsd` running a `TCPServerInterface`, and forwards raw bytes in both directions without parsing any frames.
 - `rnsd` receives HDLC frames from the bridge exactly the way it does from any other TCP peer — the bridge is indistinguishable on the wire from a local TCP client.
+
+The Go binary is the default suggestion: ~3-4 MB, no runtime dependency, no `pip install`, instant start. The Python script is there as a no-build fallback if you already have Python and prefer not to download a binary.
 
 Identity and all protocol work stays in the browser. `rnsd` is only acting as a transport — it does not own your Reticulum identity, does not see your private keys, and does not decrypt your messages. From `rnsd`'s point of view, the browser is a peer node on its TCP interface.
 
@@ -117,29 +119,56 @@ rnsd
 
 Leave it running. You should see a line like `Listening for TCP connections on 0.0.0.0:4242`.
 
-**2. Install the bridge requirements** on the same machine:
+**2. Get the bridge.** Pick one of the two paths.
+
+**2a. Prebuilt Go binary (recommended).** Grab the latest from the [bridge releases page](https://github.com/thatSFguy/reticulum-lora-webclient/releases?q=bridge-v) and save it next to your other tools. Pick by platform:
+
+- `ws_bridge-*-windows-amd64.exe` — Windows 10/11 64-bit
+- `ws_bridge-*-linux-amd64` — Linux 64-bit
+- `ws_bridge-*-darwin-arm64` — macOS Apple Silicon
+
+Then verify the download against the published `SHA256SUMS.txt`:
+
+```bash
+sha256sum -c SHA256SUMS.txt          # Linux / macOS / Git Bash
+certutil -hashfile ws_bridge-*.exe SHA256   # PowerShell on Windows
+```
+
+On Linux / macOS, `chmod +x ws_bridge-*` once after downloading.
+
+**2b. Python script (alternative).** If you'd rather not download a binary:
 
 ```bash
 pip install websockets
 ```
 
-The bridge depends only on `websockets` (stdlib `asyncio` does the rest). `rns` is already installed from step 1.
+The Python bridge depends only on `websockets` (stdlib `asyncio` does the rest). `rns` is already installed from step 1.
 
-**3. Start the bridge** from the repo root:
+**3. Start the bridge.** It listens on `ws://localhost:7878` by default. The Reticulum daemon target (`host:port`) is supplied by the webapp at connect time — the bridge itself takes no rnsd flags (Go bridge) or uses defaults (`localhost:4242`, Python bridge).
 
 ```bash
+# Go binary (Windows)
+ws_bridge.exe                          # listen on localhost:7878
+ws_bridge.exe -bind 0.0.0.0 -port 7878 # LAN-visible, custom port
+
+# Go binary (Linux / macOS)
+./ws_bridge-*-linux-amd64              # same defaults
+
+# Python script
 python tools/ws_bridge.py
-```
-
-By default it listens on `ws://localhost:7878` and forwards to `tcp://localhost:4242`. Override with flags if your `rnsd` runs somewhere else:
-
-```bash
 python tools/ws_bridge.py --ws-host 0.0.0.0 --ws-port 7878 --rnsd-host 10.0.0.5 --rnsd-port 4242
 ```
 
-You will see `[ws_bridge] listening on ws://localhost:7878` followed by `[ws_bridge] forwarding to tcp://localhost:4242`. That is the signal that the bridge is up and ready for the browser.
+You'll see `ws_bridge listening on ws://localhost:7878` (Go) or the equivalent two-line Python banner. That's the signal the bridge is up.
 
-**4. Open the web client** — either the live GitHub Pages URL or a local `python -m http.server 8000` copy — and hit **Connect (WebSocket)** with the URL field set to `ws://localhost:7878` (the default). The log panel will print `WebSocket connected` and `Connected to Reticulum network via WebSocket`, and the messaging panel will appear without any radio config step.
+**Per-connection rnsd target — the practical difference between the two bridges:** the Go bridge accepts the rnsd `host:port` from the webapp via query parameters on every connection, so one running bridge can serve any number of webapp instances pointed at any number of different `rnsd`s without restart. The Python bridge ignores those query parameters and always uses its own `--rnsd-host`/`--rnsd-port` flags from startup; the same webapp UI works against either bridge.
+
+**4. Open the web client** — either the live GitHub Pages URL or a local `python -m http.server 8000` copy — and hit **Connect (WebSocket)**. Two fields in the connect card:
+
+- **WebSocket bridge URL** — defaults to `ws://localhost:7878`. Change only if your bridge runs elsewhere.
+- **Reticulum daemon (host:port)** — the rnsd you want to reach (e.g. `rns.michmesh.net:7822` for the public mesh, or `localhost:4242` for a local daemon). Required by the Go bridge; ignored by the Python bridge but harmless to fill in.
+
+Both fields persist across reloads (localStorage). The log panel will print `WebSocket connected` and `Connected to Reticulum network via WebSocket`; the messaging panel appears without any radio-config step.
 
 **5. Announce yourself.** Enter a display name and click `Send Announce`. Within a second or two your announce should show up in any other Reticulum client connected to the same network — including Sideband and MeshChat if they are on the same backbone.
 
@@ -149,9 +178,9 @@ If you load the web client from `https://thatsfguy.github.io/reticulum-lora-webc
 
 1. **Load the web client locally, not from GitHub Pages.** `python -m http.server 8000` from the repo root and open `http://localhost:8000/`. Now `ws://localhost:7878` is same-origin in terms of scheme compatibility and the browser allows it. This is the fastest way to try the TCP path.
 
-2. **Serve the bridge as `wss://` with a certificate the browser trusts.** Edit `tools/ws_bridge.py` to wrap the `websockets.serve` call in an `ssl_context`. Any cert works as long as the browser trusts it — letsencrypt, a self-signed cert you imported into the OS trust store, or a development cert from `mkcert`. Then update the URL field in the web client to `wss://your.domain:7878`.
+2. **Serve the bridge as `wss://` with a certificate the browser trusts.** With the Python bridge, edit `tools/ws_bridge.py` to wrap the `websockets.serve` call in an `ssl_context`. The Go binary doesn't currently have a built-in TLS flag — option 3 below is the right path for that. Either way, any cert works as long as the browser trusts it — letsencrypt, a self-signed cert you imported into the OS trust store, or a development cert from `mkcert`. Then update the URL field in the web client to `wss://your.domain:7878`.
 
-3. **Use a reverse proxy.** Run nginx or caddy in front of the bridge with a TLS cert, terminating TLS and forwarding `wss://` to the plain bridge. This is the production story for anything exposed to the internet.
+3. **Use a reverse proxy.** Run nginx or caddy in front of the bridge with a TLS cert, terminating TLS and forwarding `wss://` to the plain bridge. This is the production story for anything exposed to the internet, and the recommended way to put TLS in front of the Go binary.
 
 Option 1 is fine for one-machine testing. Option 3 is the right answer for anything you want to keep running.
 
