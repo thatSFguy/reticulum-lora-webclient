@@ -844,16 +844,31 @@ function trackPath(announce, pkt) {
     pathTable.delete(oldest);
   }
 
-  // Learn the upstream rnsd's identity from a SINGLE-destination
-  // hops=0 announce on the WS path. Only do this when there is no
-  // RNode in the loop — over BLE/serial, hops=0 announces come from
-  // peers in radio earshot, not from a routing relay.
-  if (pkt.hops === 0
-      && rnode && rnode.capabilities && rnode.capabilities.rnodeControl === false
-      && upstreamTransportId === null
-      && announce.identityHash) {
-    upstreamTransportId = new Uint8Array(announce.identityHash);
-    log('info', `Learned upstream rnsd identity ${toHex(upstreamTransportId)} (will use as next-hop transport_id for HEADER_2 sends per SPEC §2.3)`);
+  // Learn the upstream rnsd's identity from inbound HEADER_2 packets.
+  // Empirically (v0.4.1 testing on rns.michmesh.net), michmesh forwards
+  // announces to TCPServerInterface peers as HEADER_2 with its own
+  // identity in the transport_id field — so any H2 packet's
+  // pkt.transportId IS our upstream's identity, exactly the value we
+  // need to insert when emitting HEADER_2 sends per SPEC §2.3.
+  //
+  // We don't try the hops=0 ANNOUNCE channel in practice: many
+  // production rnsd deployments don't emit SINGLE self-announces with
+  // hops=0, and even when they do they're easy to miss (rare cadence).
+  // The H2 transport_id channel fires on every inbound packet.
+  //
+  // Only learn when there's no RNode in the loop — over BLE/serial,
+  // any transport_id we'd see is from a different topology.
+  if (pkt.headerType === HEADER_2
+      && pkt.transportId && pkt.transportId.length === 16
+      && rnode && rnode.capabilities && rnode.capabilities.rnodeControl === false) {
+    if (upstreamTransportId === null) {
+      upstreamTransportId = new Uint8Array(pkt.transportId);
+      log('info', `Learned upstream rnsd identity ${toHex(upstreamTransportId)} from inbound HEADER_2 transport_id (will use as next-hop for HEADER_2 sends per SPEC §2.3)`);
+    } else if (!arraysEqual(pkt.transportId, upstreamTransportId)) {
+      // Different transport_id seen — could mean we're behind a
+      // multi-rnsd path or our learning was wrong. Don't log on every
+      // packet (would flood); rely on the user to notice send failures.
+    }
   }
 
   // Resolve any path? request that was waiting for this destination.
@@ -1496,19 +1511,31 @@ async function sendMessage() {
     const recipientPub = contact.ratchetPub || contact.identity.encPubKey;
     const encrypted = await encrypt(lxmfPayload, recipientPub, contact.identity.hash);
 
-    // SPEC §2.3 originator HEADER_1 → HEADER_2 conversion. When the
-    // destination is more than 1 hop away, the originator MUST emit
-    // HEADER_2 with the next-hop transport_id; otherwise the relay
-    // silently drops the packet. Only fires when:
-    //   - we have a pathTable entry with hops > 1, AND
-    //   - we know our upstream's identity hash (learned from hops=0
-    //     announces over the WS interface in trackPath()).
-    // For BLE/serial direct via RNode, neither condition is typically
-    // met, so we fall through to HEADER_1 — correct for a 1-hop LoRa
-    // mesh where we ARE the originator.
+    // SPEC §2.3 originator HEADER_1 → HEADER_2 conversion. The spec
+    // says an originator MAY stay HEADER_1 only when the destination
+    // is 0 hops away AND it's a local client of the receiving rnsd
+    // (the for_local_client auto-fill branch). For a webapp connected
+    // via WS bridge, "local client of michmesh" means another TCP
+    // peer of michmesh's rnsd — basically nobody we'd actually message.
+    // Any peer reachable via michmesh's broader mesh is at hops >= 1
+    // and is NOT a local client, so HEADER_1 to that peer is silently
+    // dropped at michmesh.
+    //
+    // Threshold is hops >= 1 (not > 1 like upstream Python does):
+    // upstream's > 1 only works because share_instance handles the == 1
+    // case. We're not on share_instance, so we have to convert at the
+    // == 1 boundary too.
+    //
+    // Fires only when:
+    //   - we have a pathTable entry with hops >= 1, AND
+    //   - we know our upstream's identity hash (learned from inbound
+    //     HEADER_2 transport_ids in trackPath).
+    // For BLE/serial via RNode, upstreamTransportId stays null, so we
+    // fall through to HEADER_1 — correct for a 1-hop LoRa mesh where
+    // we ARE the originator on a single-hop link.
     const pathInfo = pathTable.get(toHex(contact.destHash));
     let packet;
-    if (pathInfo && pathInfo.hops > 1 && upstreamTransportId) {
+    if (pathInfo && pathInfo.hops >= 1 && upstreamTransportId) {
       packet = buildPacket({
         headerType: HEADER_2,
         transportType: TRANSPORT_TRANSPORT,
@@ -1529,8 +1556,8 @@ async function sendMessage() {
         context: 0x00,
         payload: encrypted,
       });
-      if (pathInfo && pathInfo.hops > 1) {
-        log('info', `  HEADER_1 send to ${pathInfo.hops}-hop dest (upstream identity not yet learned — packet may fail until we observe a hops=0 rnsd announce)`);
+      if (pathInfo && pathInfo.hops >= 1) {
+        log('info', `  HEADER_1 send to ${pathInfo.hops}-hop dest (upstream identity not yet learned — packet will likely fail at the relay until we observe a HEADER_2 inbound packet to learn it)`);
       }
     }
 
