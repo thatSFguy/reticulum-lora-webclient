@@ -64,21 +64,45 @@ export function parsePacket(data) {
   };
 }
 
-// Build a Reticulum packet
+// Build a Reticulum packet.
+//
+// For HEADER_2 packets, pass transportId (16 bytes) — it is inserted
+// between the hops byte and the dest_hash, growing the header to 35
+// bytes (flags + hops + transport_id + dest_hash + context). HEADER_2
+// is required when an originator sends to a destination known to be
+// > 1 hop away (SPEC §2.3); the transport_id slot carries the
+// next-hop relay's identity hash so the relay's Transport.inbound
+// recognises itself as the next hop and forwards via §12.2.
 export function buildPacket({ headerType = HEADER_1, contextFlag = 0, transportType = TRANSPORT_BROADCAST,
                               destType = DEST_SINGLE, packetType = PACKET_DATA, hops = 0,
-                              destHash, context = 0x00, payload = new Uint8Array(0) }) {
+                              destHash, context = 0x00, payload = new Uint8Array(0),
+                              transportId = null }) {
   const flags = ((headerType & 0x01) << 6) |
                 ((contextFlag & 0x01) << 5) |
                 ((transportType & 0x01) << 4) |
                 ((destType & 0x03) << 2) |
                 (packetType & 0x03);
 
-  const header = new Uint8Array(2 + TRUNCATED_HASHLENGTH + 1);
-  header[0] = flags;
-  header[1] = hops;
-  header.set(destHash, 2);
-  header[2 + TRUNCATED_HASHLENGTH] = context;
+  let header;
+  if (headerType === HEADER_2) {
+    if (!transportId || transportId.length !== TRUNCATED_HASHLENGTH) {
+      throw new Error('buildPacket: HEADER_2 requires a 16-byte transportId');
+    }
+    // flags(1) || hops(1) || transport_id(16) || dest_hash(16) || context(1)
+    header = new Uint8Array(2 + 2 * TRUNCATED_HASHLENGTH + 1);
+    header[0] = flags;
+    header[1] = hops;
+    header.set(transportId, 2);
+    header.set(destHash, 2 + TRUNCATED_HASHLENGTH);
+    header[2 + 2 * TRUNCATED_HASHLENGTH] = context;
+  } else {
+    // HEADER_1: flags(1) || hops(1) || dest_hash(16) || context(1)
+    header = new Uint8Array(2 + TRUNCATED_HASHLENGTH + 1);
+    header[0] = flags;
+    header[1] = hops;
+    header.set(destHash, 2);
+    header[2 + TRUNCATED_HASHLENGTH] = context;
+  }
 
   const packet = new Uint8Array(header.length + payload.length);
   packet.set(header);

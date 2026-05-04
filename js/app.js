@@ -7,7 +7,7 @@ import { RNode } from './rnode.js';
 import { RnsdInterface } from './rnsd-interface.js';
 import { toHex } from './kiss.js';
 import { Identity, computeDestinationHash, computeNameHash, truncatedHash } from './identity.js';
-import { parsePacket, buildPacket, PACKET_ANNOUNCE, PACKET_DATA, PACKET_LINKREQ, PACKET_PROOF, DEST_SINGLE, DEST_LINK, HEADER_1, PACKET_TYPE_NAMES } from './reticulum.js';
+import { parsePacket, buildPacket, PACKET_ANNOUNCE, PACKET_DATA, PACKET_LINKREQ, PACKET_PROOF, DEST_SINGLE, DEST_LINK, DEST_PLAIN, HEADER_1, HEADER_2, TRANSPORT_BROADCAST, TRANSPORT_TRANSPORT, PACKET_TYPE_NAMES } from './reticulum.js';
 import { parseAnnounce, validateAnnounce, buildAnnounce, extractDisplayName, concatBytes, arraysEqual } from './announce.js';
 import { encrypt, decrypt } from './crypto.js';
 import { unpackMessage, unpackLinkMessage, verifyMessageSignature, packMessage } from './lxmf.js';
@@ -125,6 +125,35 @@ let contactFilterPinnedOnly = (() => {
   catch (_) { return false; }
 })();
 let contactSearchTerm = '';
+
+// Per-interface routing state. Reset on disconnect — a different rnsd
+// has a different identity hash and a different mesh topology. We do
+// not persist these across sessions because the upstream identity is
+// rediscovered passively from the next batch of announces, and stale
+// path-table entries would only cause silent send failures.
+//
+// pathTable: destHashHex → { hops, lastSeen }. Built from received
+// announces (lxmf and non-lxmf). Bounded FIFO.
+//
+// upstreamTransportId: the 16-byte identity hash of the rnsd we're
+// directly connected to over the WS bridge. Required by SPEC §2.3:
+// when we send to a destination > 1 hop away, the originator MUST
+// emit HEADER_2 with the next-hop transport_id, otherwise the relay
+// silently drops the packet. Learned from announces that arrive with
+// `pkt.hops == 0` over the WS interface — only the rnsd we are
+// directly connected to originates announces visible to us with
+// hops=0 (other peers' announces get incremented to >=1 by the time
+// they reach us via michmesh).
+//
+// pendingPathRequests: destHashHex → resolver. The path-request
+// preamble (SPEC §7.1, flows/send-opportunistic-lxmf.md step 4)
+// blocks the send until either the path-response announce arrives
+// or PATH_REQUEST_WAIT_MS elapses.
+const pathTable = new Map();
+const PATH_TABLE_MAX = 1000;
+let upstreamTransportId = null;
+const pendingPathRequests = new Map();
+const PATH_REQUEST_WAIT_MS = 5000;
 
 rnode._onLog = (msg) => log('info', msg);
 
@@ -320,6 +349,14 @@ async function handleAnnounce(pkt, rssi) {
 
   if (!valid) return;
 
+  // Validated — track in the routing path table. SPEC §2.3 / §12.2:
+  // sendMessage uses pathTable to choose HEADER_1 vs HEADER_2 framing;
+  // upstreamTransportId is learned from hops=0 announces over the WS
+  // interface (only the rnsd we're directly connected to originates
+  // announces visible to us with hops=0 — every transit hop bumps
+  // hops by 1).
+  trackPath(announce, pkt);
+
   // Store contact
   const destHashBytes = announce.destHash || pkt.destHash;
   const destHashHex = toHex(destHashBytes);
@@ -364,6 +401,16 @@ async function handleNonLxmfAnnounce(announce, pkt, rssi) {
 
   // Skip our own echoed announces — noisy and never useful.
   if (myIdentity && idHash === toHex(myIdentity.hash)) return;
+
+  // Track in pathTable. Non-LXMF announces are how we typically learn
+  // the upstream rnsd's identity: rnsd announces a few SINGLE service
+  // destinations (rnstransport.broadcasts etc.) that arrive at us
+  // with hops=0 — only the directly-connected rnsd produces those.
+  // We don't gate on signature validity here because handleNonLxmfAnnounce
+  // currently doesn't validate signatures (a pre-existing gap); the
+  // hops=0 / WS-interface check below is what guards the upstream
+  // identity learning against forgery.
+  trackPath(announce, pkt);
 
   const destHashBytes = announce.destHash || pkt.destHash;
   const destHashHex = toHex(destHashBytes);
@@ -774,6 +821,103 @@ async function handleData(pkt, rxInfo) {
     log('info', `    our ratchet pub: ${ratchetPubPrefix}... enc pub: ${encPubPrefix}...`);
     log('info', `    tried ${candidatePrivs.length} key(s). If sender has a stale contact, send an announce and ask them to retry.`);
   }
+}
+
+// Update pathTable from a received announce, and learn upstream
+// transport_id from hops=0 announces over the WS interface.
+//
+// SPEC §2.3: when sending to a destination > 1 hop away, the
+// originator MUST emit HEADER_2 with the next-hop transport_id.
+// pathTable lets us know hops; upstreamTransportId lets us know
+// which identity to insert.
+//
+// SPEC §2.4: hops is incremented by every transit relay. Only the
+// originator emits hops=0 — so an announce arriving at us with
+// pkt.hops==0 over the WS interface MUST have come from the rnsd
+// we're directly connected to (every other peer's announce gets
+// bumped to >=1 by the time it reaches us through that rnsd).
+function trackPath(announce, pkt) {
+  const destHashHex = toHex(announce.destHash || pkt.destHash);
+  pathTable.set(destHashHex, { hops: pkt.hops, lastSeen: Date.now() });
+  if (pathTable.size > PATH_TABLE_MAX) {
+    const oldest = pathTable.keys().next().value;
+    pathTable.delete(oldest);
+  }
+
+  // Learn the upstream rnsd's identity from a SINGLE-destination
+  // hops=0 announce on the WS path. Only do this when there is no
+  // RNode in the loop — over BLE/serial, hops=0 announces come from
+  // peers in radio earshot, not from a routing relay.
+  if (pkt.hops === 0
+      && rnode && rnode.capabilities && rnode.capabilities.rnodeControl === false
+      && upstreamTransportId === null
+      && announce.identityHash) {
+    upstreamTransportId = new Uint8Array(announce.identityHash);
+    log('info', `Learned upstream rnsd identity ${toHex(upstreamTransportId)} (will use as next-hop transport_id for HEADER_2 sends per SPEC §2.3)`);
+  }
+
+  // Resolve any path? request that was waiting for this destination.
+  const pending = pendingPathRequests.get(destHashHex);
+  if (pending) {
+    clearTimeout(pending.timer);
+    pendingPathRequests.delete(destHashHex);
+    pending.resolve(true);
+  }
+}
+
+// Issue a path? request to the well-known rnstransport.path.request
+// dest and wait up to PATH_REQUEST_WAIT_MS for a path-response
+// announce to populate pathTable. Returns true if a path arrived in
+// time, false on timeout. SPEC §7.1, flows/send-opportunistic-lxmf.md
+// step 4.
+//
+// Payload (leaf form): target_dest_hash(16) || random_tag(16) — 32 bytes.
+async function requestPath(destHash) {
+  if (!pathRequestDest) {
+    log('err', '  Cannot send path? — pathRequestDest not initialised');
+    return false;
+  }
+  const destHashHex = toHex(destHash);
+
+  // Already known — nothing to do.
+  if (pathTable.has(destHashHex)) return true;
+
+  // Coalesce: if a request is already in flight for this dest, wait
+  // on the same promise rather than spamming duplicate path? packets.
+  const existing = pendingPathRequests.get(destHashHex);
+  if (existing) {
+    return new Promise((resolve) => {
+      const orig = existing.resolve;
+      existing.resolve = (ok) => { orig(ok); resolve(ok); };
+    });
+  }
+
+  const tag = new Uint8Array(16);
+  crypto.getRandomValues(tag);
+  const payload = new Uint8Array(32);
+  payload.set(destHash, 0);
+  payload.set(tag, 16);
+
+  const packet = buildPacket({
+    headerType: HEADER_1,
+    destType: DEST_PLAIN,
+    transportType: TRANSPORT_BROADCAST,
+    packetType: PACKET_DATA,
+    destHash: pathRequestDest,
+    context: CTX_NONE,
+    payload,
+  });
+
+  log('info', `  path? sent for ${destHashHex.substring(0,16)}... tag=${toHex(tag).substring(0,16)}`);
+  await rnode.sendPacket(packet);
+
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      pendingPathRequests.delete(destHashHex);
+      resolve(false);
+    }, PATH_REQUEST_WAIT_MS);
+    pendingPathRequests.set(destHashHex, { resolve, timer });
+  });
 }
 
 // Path-request handler. Implements the minimum-leaf responsibility
@@ -1321,6 +1465,22 @@ async function sendMessage() {
   }
 
   try {
+    // Path-request preamble (SPEC §7.1, flows/send-opportunistic-lxmf.md
+    // step 4). Upstream LXMF issues a path? request before sending if the
+    // local Transport.path_table has no entry. We mirror that for
+    // destinations missing from our pathTable: without it, michmesh has
+    // no cached path so our DATA gets dropped — and we can't tell from
+    // the WS path whether a peer is reachable until we try.
+    if (radioOn && !pathTable.has(toHex(contact.destHash))) {
+      log('info', `  No path known to ${toHex(contact.destHash).substring(0,16)}... — issuing path? preamble`);
+      const got = await requestPath(contact.destHash);
+      if (got) {
+        log('ok', `  Path response received in ${PATH_REQUEST_WAIT_MS}ms window`);
+      } else {
+        log('info', `  path? timed out after ${PATH_REQUEST_WAIT_MS}ms — sending anyway, may fail silently if rnsd has no route`);
+      }
+    }
+
     // Pack LXMF message. LXMF's source_hash field is the sender's
     // LXMF delivery *destination* hash, not the identity hash —
     // receivers key their contact table on destination hashes.
@@ -1336,15 +1496,43 @@ async function sendMessage() {
     const recipientPub = contact.ratchetPub || contact.identity.encPubKey;
     const encrypted = await encrypt(lxmfPayload, recipientPub, contact.identity.hash);
 
-    // Build Reticulum packet
-    const packet = buildPacket({
-      headerType: HEADER_1,
-      destType: DEST_SINGLE,
-      packetType: PACKET_DATA,
-      destHash: contact.destHash,
-      context: 0x00,
-      payload: encrypted,
-    });
+    // SPEC §2.3 originator HEADER_1 → HEADER_2 conversion. When the
+    // destination is more than 1 hop away, the originator MUST emit
+    // HEADER_2 with the next-hop transport_id; otherwise the relay
+    // silently drops the packet. Only fires when:
+    //   - we have a pathTable entry with hops > 1, AND
+    //   - we know our upstream's identity hash (learned from hops=0
+    //     announces over the WS interface in trackPath()).
+    // For BLE/serial direct via RNode, neither condition is typically
+    // met, so we fall through to HEADER_1 — correct for a 1-hop LoRa
+    // mesh where we ARE the originator.
+    const pathInfo = pathTable.get(toHex(contact.destHash));
+    let packet;
+    if (pathInfo && pathInfo.hops > 1 && upstreamTransportId) {
+      packet = buildPacket({
+        headerType: HEADER_2,
+        transportType: TRANSPORT_TRANSPORT,
+        destType: DEST_SINGLE,
+        packetType: PACKET_DATA,
+        destHash: contact.destHash,
+        transportId: upstreamTransportId,
+        context: 0x00,
+        payload: encrypted,
+      });
+      log('info', `  HEADER_2 send: dest ${pathInfo.hops} hops away, transport_id=${toHex(upstreamTransportId).substring(0,16)}...`);
+    } else {
+      packet = buildPacket({
+        headerType: HEADER_1,
+        destType: DEST_SINGLE,
+        packetType: PACKET_DATA,
+        destHash: contact.destHash,
+        context: 0x00,
+        payload: encrypted,
+      });
+      if (pathInfo && pathInfo.hops > 1) {
+        log('info', `  HEADER_1 send to ${pathInfo.hops}-hop dest (upstream identity not yet learned — packet may fail until we observe a hops=0 rnsd announce)`);
+      }
+    }
 
     // Check size
     if (packet.length > 500) {
@@ -1948,6 +2136,14 @@ async function connect(transportType) {
       log('err', 'Transport disconnected unexpectedly');
       if (announceTimer) { clearInterval(announceTimer); announceTimer = null; }
       if (outboundRetryTimer) { clearInterval(outboundRetryTimer); outboundRetryTimer = null; }
+      // Routing state is per-interface — different rnsd has a different
+      // identity hash and a different mesh topology. Clear so a future
+      // reconnect rediscovers everything from the next batch of announces
+      // rather than acting on stale data.
+      pathTable.clear();
+      upstreamTransportId = null;
+      for (const [, p] of pendingPathRequests) clearTimeout(p.timer);
+      pendingPathRequests.clear();
       setConnectionState(false, 'Disconnected');
       $('btn-disconnect').classList.add('hidden');
       setConnectButtonsHidden(false);
