@@ -2157,8 +2157,38 @@ async function connect(transportType) {
     //   'ble' / 'serial' → RNode-over-KISS (owns a radio)
     //   'ws'             → rnsd-over-HDLC (no radio, direct to a Reticulum daemon)
     if (transportType === 'ws') {
-      const url = ($('ws-url').value || '').trim();
-      if (!url) { log('err', 'WebSocket URL is empty'); return; }
+      const baseUrl = ($('ws-url').value || '').trim();
+      const rnsdTarget = ($('ws-rnsd').value || '').trim();
+      if (!baseUrl) { log('err', 'WebSocket URL is empty'); return; }
+
+      // The Go bridge takes the rnsd target per-connection via query
+      // params (?host=X&port=Y). The Python bridge ignores the query
+      // and uses its own --rnsd-host/--rnsd-port flags, so the same
+      // URL works against either bridge — the Python one just ignores
+      // the extra params.
+      let url = baseUrl;
+      if (rnsdTarget) {
+        const colonIx = rnsdTarget.lastIndexOf(':');
+        if (colonIx <= 0) {
+          log('err', `Reticulum daemon target must be host:port (got "${rnsdTarget}")`);
+          return;
+        }
+        const host = rnsdTarget.slice(0, colonIx);
+        const port = rnsdTarget.slice(colonIx + 1);
+        if (!/^\d+$/.test(port)) {
+          log('err', `Reticulum daemon port must be numeric (got "${port}")`);
+          return;
+        }
+        const sep = baseUrl.includes('?') ? '&' : '?';
+        url = `${baseUrl}${sep}host=${encodeURIComponent(host)}&port=${encodeURIComponent(port)}`;
+      }
+
+      // Persist both fields so the user doesn't re-type on every reload.
+      try {
+        localStorage.setItem('rlw.wsUrl', baseUrl);
+        localStorage.setItem('rlw.wsRnsd', rnsdTarget);
+      } catch (_) { /* private mode — non-fatal */ }
+
       rnode = new RnsdInterface(url);
       checkWsSecurityWarning(url);
     } else {
@@ -2434,6 +2464,15 @@ $('theme-toggle')?.addEventListener('click', () => {
 matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
   if ((localStorage.getItem(THEME_KEY) || 'system') === 'system') applyTheme('system');
 });
+
+// Restore the WS bridge URL and the rnsd target from the previous
+// session. Plain text fields, no validation here — connect() validates.
+try {
+  const savedWsUrl = localStorage.getItem('rlw.wsUrl');
+  if (savedWsUrl && $('ws-url')) $('ws-url').value = savedWsUrl;
+  const savedRnsd = localStorage.getItem('rlw.wsRnsd');
+  if (savedRnsd && $('ws-rnsd')) $('ws-rnsd').value = savedRnsd;
+} catch (_) { /* private mode — non-fatal */ }
 
 // ---- Init ------------------------------------------------------------
 updateAvatars();

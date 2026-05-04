@@ -38,6 +38,13 @@ Usage
   # Override host/port via CLI args:
   #
   #     python tools/ws_bridge.py --ws-port 7878 --rnsd-host 10.0.0.5 --rnsd-port 4242
+  #
+  # Note: this bridge IGNORES any ?host=X&port=Y query parameters in
+  # the WebSocket URL — it always forwards to the --rnsd-host/--rnsd-port
+  # set at startup. The Go bridge in tools/ws_bridge.go uses those query
+  # parameters to take the rnsd target per-connection. The webapp sends
+  # the query params either way, so the same UI works against either
+  # bridge.
 """
 import argparse
 import asyncio
