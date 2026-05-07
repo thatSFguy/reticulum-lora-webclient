@@ -1,6 +1,8 @@
 # Transport node programming
 
 > **Move this file to** `reticulum-lora-webclient/docs/transport_node_programming.md`. It was authored in the transport-node repo because the sandbox blocked direct writes to the sibling repo; the content is intended for the webclient.
+>
+> **Live flasher** — drag-and-drop UF2 binaries to nRF52840 boards from the browser: <https://thatsfguy.github.io/reticulum-lora-webclient/flasher.html>
 
 This document describes the protocol the webclient uses to configure a `reticulum-lora-transport` node. The transport node's firmware exposes a config surface over **two transports** — both speaking the same payload protocol (msgpack over a thin framing layer). The webclient should target whichever the user's connection mode supports (Web Bluetooth or Web Serial); the application logic above the transport is identical.
 
@@ -20,7 +22,7 @@ Use Web Bluetooth (`navigator.bluetooth.requestDevice`). The device advertises a
 | `request` characteristic | `00000000-a5a5-524c-7272-00000200726c` — properties: write / write-without-response, max 244 bytes per write |
 | `response` characteristic | `00000000-a5a5-524c-7272-00000300726c` — properties: notify, max 244 bytes per notification |
 
-The advertised device name is currently fixed to `rlr-transport`. (When `Config.display_name` persistence wires through, the device name will reflect it.)
+The advertised device name is `Config.display_name`. On first boot the firmware stamps a unique default of the form **`Rptr-XXXXXXXX`** (the first 4 bytes of the node's `identity_hash` in hex), so every fresh node is uniquely identifiable on a BLE scan without any setup. Operators can override via `set_config` + `commit`; the override persists across reboots.
 
 **Connection flow:**
 1. `navigator.bluetooth.requestDevice({ filters: [{ services: [SERVICE_UUID] }] })`
@@ -141,13 +143,13 @@ Health check. Confirms the device responds and exposes its identity hash for UI 
 {
   "ok": true,
   "identity_hash": <bin 16 bytes>,
-  "version": "v0.1"
+  "version": "v0.1.6"
 }
 ```
 
 `identity_hash` is the device's stable 16-byte identity hash (`SHA256(public_key)[:16]` per Reticulum spec §1.1). It persists across reboots — use it as a stable device key in the webapp's UI.
 
-`version` is the firmware version string. Use to gate features the webapp depends on.
+`version` is the firmware version string, injected at build time. Tagged release builds report the tag exactly (`v0.1.6`). Dev / master builds report `git describe --tags --always --dirty` (e.g. `v0.1.5-3-gabcdef0`). Builds that bypass the inject script report `dev`. Use to gate features the webapp depends on.
 
 ### 3.2 `get_config`
 
@@ -171,7 +173,7 @@ Read all Config fields.
   "lon_udeg": 0,
   "alt_m": 0,
   "batt_mult": 1.284,
-  "display_name": ""
+  "display_name": "Rptr-9baae22f"
 }
 ```
 
@@ -201,17 +203,17 @@ Update one or more Config fields **in memory only** — no flash write. Call `co
 `set` is the count of recognised fields applied. Unknown fields are silently skipped (forward-compat).
 
 **Type rules:**
-- All radio + position fields are msgpack uints. Negative integer fields (`txp_dbm`, `lat_udeg`, `lon_udeg`, `alt_m`) are sent as the **uint32 bit pattern** of the int32 value. JS encoding:
+- Integer fields accept **either** signed or unsigned msgpack encodings. Just pass JS numbers directly — `@msgpack/msgpack`'s native encoding works for both positive and negative values:
   ```js
-  // -50 dBm:
-  const txp = ((-50) >>> 0);    // 4294967246 — pass this as the value
+  encode({ cmd: "set_config", lat_udeg: 37774900,  lon_udeg: -122419400 });
   ```
-  Webapp decodes the response the inverse way:
+  The webclient does NOT need the uint32 bit-pattern hack documented in earlier versions of this doc. The firmware's `read_int` accepts negative-fixint, int8/16/32/64, positive-fixint, and uint8/16/32/64 transparently.
+- **Response decoding** of negative fields: `get_config` still emits all integers as msgpack uints (since the firmware uses fixed-width writers for wire stability). Decode signed fields by re-casting:
   ```js
-  const txp = (rawUint << 0);   // back to signed int32
+  const lat_udeg = (rawUint << 0);   // back to signed int32
   ```
-- `batt_mult` is float32.
-- `display_name` is a UTF-8 string (max 31 chars; longer values are silently truncated).
+- `batt_mult` is decoded as either msgpack float32 or float64 — pass JS numbers directly (which encode as float64 by default in `@msgpack/msgpack`).
+- `display_name` is a UTF-8 string (max 31 chars; longer values are silently truncated). Defaults to `Rptr-XXXXXXXX` per §1.1; pass any UTF-8 string to override.
 
 ### 3.4 `commit`
 
@@ -251,7 +253,7 @@ Single source of truth: `src/Config.h` in the firmware repo. When that file chan
 | `lon_udeg` | int32 | 0 | ±180,000,000 | Longitude in microdegrees. 0 = unset. |
 | `alt_m` | int32 | 0 | n/a | Altitude in meters above sea level. 0 = unset. |
 | `batt_mult` | float32 | 1.0 (board default in header) | 0.1..10.0 | ADC scale factor for battery voltage divider. Each board's header has a default; webapp can override after a CALIBRATE BATTERY flow. |
-| `display_name` | str ≤31 chars | `""` | UTF-8 | Human-readable device name; will eventually drive the BLE advert name. |
+| `display_name` | str ≤31 chars | `Rptr-XXXXXXXX` (auto, first 4 bytes of `identity_hash` hex) | UTF-8 | Human-readable device name. Drives the BLE advert name and the `name` field in the telemetry beacon. |
 
 ---
 

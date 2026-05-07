@@ -22,29 +22,18 @@ const SERIAL_BAUD       = 115200;
 const SERIAL_MAX_FRAME  = 1024;
 const RESPONSE_TIMEOUT  = 5000;
 
-// signed-int fields are sent as the uint32 bit pattern of the int32
-// value (firmware reads them as msgpack uints and reinterprets bits).
+// On the response side, get_config wire-emits all integers as msgpack
+// uints (per docs/transport_node_programming.md §3.3), so signed fields
+// arrive as uint32 bit patterns and must be re-cast to int32. Outbound
+// requests do NOT need this conversion — the firmware's read_int
+// accepts negative-fixint / int8/16/32/64 natively, and forcing the
+// uint32 bit pattern would now fail the per-field range check.
 const SIGNED_INT32_FIELDS = ['txp_dbm', 'lat_udeg', 'lon_udeg', 'alt_m'];
 
-function toUint32Bits(int32) {
-  return (int32 >>> 0);
-}
-function fromUint32Bits(uint32) {
-  return (uint32 | 0);
-}
-
-// Apply the signed-int wire-format conversion in both directions.
-function encodeSignedFields(obj) {
-  const out = { ...obj };
-  for (const k of SIGNED_INT32_FIELDS) {
-    if (k in out && typeof out[k] === 'number') out[k] = toUint32Bits(out[k]);
-  }
-  return out;
-}
 function decodeSignedFields(obj) {
   const out = { ...obj };
   for (const k of SIGNED_INT32_FIELDS) {
-    if (k in out && typeof out[k] === 'number') out[k] = fromUint32Bits(out[k]);
+    if (k in out && typeof out[k] === 'number') out[k] = (out[k] | 0);
   }
   return out;
 }
@@ -213,11 +202,11 @@ class TransportClient {
   }
 
   // `fields` is an object containing any subset of the writable Config
-  // fields. `cmd` is prepended automatically and signed-int fields are
-  // converted to uint32 bit patterns before encoding.
+  // fields. JS numbers are passed through msgpack natively — negative
+  // ints encode as negative-fixint / int8/16/32, which the firmware's
+  // read_int accepts directly.
   async setConfig(fields) {
-    const wire = encodeSignedFields(fields);
-    const r = await this.call({ cmd: 'set_config', ...wire });
+    const r = await this.call({ cmd: 'set_config', ...fields });
     if (!r.ok) throw new Error(r.err || 'set_config failed');
     return r;
   }
