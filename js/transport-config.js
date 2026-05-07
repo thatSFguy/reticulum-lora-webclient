@@ -5,7 +5,14 @@
 // reference is src/Ble.cpp / src/SerialConsole.cpp / src/ConfigProtocol.cpp
 // in the reticulum-lora-transport repo.
 
-import { encode, decode } from '../lib/msgpack.js';
+import { Encoder, decode } from '../lib/msgpack.js';
+
+// forceFloat32 makes the encoder emit msgpack 0xCA (float32) instead of
+// 0xCB (float64) for non-integer numbers. The transport firmware reads
+// batt_mult strictly as float32 and rejects float64 with
+// "malformed set_config payload" — see docs/transport_node_programming.md §4.
+const encoder = new Encoder({ forceFloat32: true });
+const encode  = (obj) => encoder.encode(obj);
 
 const SERVICE_UUID  = '00000000-a5a5-524c-7272-00000100726c';
 const REQUEST_UUID  = '00000000-a5a5-524c-7272-00000200726c';
