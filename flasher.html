@@ -1,0 +1,232 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Reticulum LoRa Transport — Flasher &amp; Configurator</title>
+<style>
+  :root {
+    --bg: #0f1115;
+    --panel: #171a21;
+    --panel-2: #1e2230;
+    --border: #2a2f3c;
+    --text: #e6e8ee;
+    --muted: #9aa1b2;
+    --accent: #5eb0ff;
+    --accent-hi: #7dc0ff;
+    --ok: #4ade80;
+    --err: #f87171;
+    --warn: #fbbf24;
+    --mono: ui-monospace, "SFMono-Regular", "Cascadia Mono", Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; background: var(--bg); color: var(--text); font-family: -apple-system, "Segoe UI", Roboto, sans-serif; }
+  body { max-width: 960px; margin: 0 auto; padding: 24px 20px 80px; }
+  header { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 24px; flex-wrap: wrap; }
+  h1 { font-size: 20px; margin: 0; font-weight: 600; }
+  h1 small { color: var(--muted); font-weight: 400; font-size: 13px; display: block; margin-top: 2px; }
+  h2 { font-size: 15px; margin: 0 0 14px 0; font-weight: 600; color: var(--accent); text-transform: uppercase; letter-spacing: 0.5px; }
+  .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 18px 20px; margin-bottom: 16px; }
+  .row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+  .row + .row { margin-top: 10px; }
+  label { display: block; color: var(--muted); font-size: 12px; margin-bottom: 4px; text-transform: uppercase; letter-spacing: 0.4px; }
+  input[type="text"], input[type="number"], select {
+    background: var(--panel-2); color: var(--text); border: 1px solid var(--border); border-radius: 5px;
+    padding: 8px 10px; font-family: var(--mono); font-size: 13px; width: 100%;
+  }
+  .field { flex: 1 1 200px; min-width: 160px; }
+  .field.narrow { flex: 0 0 130px; }
+  button {
+    background: var(--accent); color: #07101c; border: 0; border-radius: 5px;
+    padding: 9px 16px; font-size: 13px; font-weight: 600; cursor: pointer;
+    transition: background 0.1s;
+  }
+  button:hover { background: var(--accent-hi); }
+  button:disabled { background: #3a4254; color: #6d7689; cursor: not-allowed; }
+  button.secondary { background: var(--panel-2); color: var(--text); border: 1px solid var(--border); }
+  button.secondary:hover { background: #272c3a; }
+  .status-dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; background: #555; margin-right: 6px; vertical-align: middle; }
+  .status-dot.on { background: var(--ok); box-shadow: 0 0 6px var(--ok); }
+  .status-dot.err { background: var(--err); }
+  .kv { display: grid; grid-template-columns: max-content 1fr; gap: 4px 18px; font-family: var(--mono); font-size: 13px; }
+  .kv dt { color: var(--muted); }
+  .kv dd { margin: 0; color: var(--text); word-break: break-all; }
+  #log { background: #0a0c10; border: 1px solid var(--border); border-radius: 5px; padding: 10px 12px; font-family: var(--mono); font-size: 12px; color: #c6cbd6; max-height: 220px; overflow-y: auto; white-space: pre-wrap; }
+  #log .tx { color: var(--accent); }
+  #log .ok { color: var(--ok); }
+  #log .err { color: var(--err); }
+  #log .info { color: var(--muted); }
+  .progress { background: var(--panel-2); border: 1px solid var(--border); border-radius: 4px; height: 10px; overflow: hidden; margin-top: 8px; }
+  .progress > div { background: var(--accent); height: 100%; width: 0%; transition: width 0.1s linear; }
+  .stage-label { font-family: var(--mono); font-size: 12px; color: var(--muted); margin-top: 6px; min-height: 16px; }
+  .file-drop { display: flex; align-items: center; gap: 12px; padding: 12px; background: var(--panel-2); border: 1px dashed var(--border); border-radius: 5px; }
+  .notice { background: #1b2233; border-left: 3px solid var(--warn); padding: 10px 14px; font-size: 13px; color: #d8dde8; border-radius: 4px; margin: 10px 0; }
+  .notice.err { border-left-color: var(--err); }
+  .notice.ok { border-left-color: var(--ok); }
+  .hidden { display: none !important; }
+  .actions { display: flex; gap: 10px; margin-top: 14px; flex-wrap: wrap; }
+  a { color: var(--accent); }
+  code { font-family: var(--mono); font-size: 12px; background: var(--panel-2); padding: 1px 5px; border-radius: 3px; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Reticulum LoRa Transport
+    <small>Flash a fresh board with the latest firmware, then configure it over USB or Bluetooth</small>
+  </h1>
+</header>
+
+<div id="unsupported" class="notice err hidden">
+  <strong>Your browser does not support Web Serial or Web Bluetooth.</strong>
+  Use a Chromium-based browser (Chrome, Edge, Opera, Brave) on desktop or Chrome on Android.
+</div>
+
+<div id="http-warn" class="notice err hidden">
+  <strong>Web Serial / Web Bluetooth require a secure context.</strong>
+  Open this page over <code>https://</code> or from <code>http://localhost</code>.
+</div>
+
+<div id="release-warn" class="notice err hidden">
+  <strong>Could not load the latest release.</strong>
+  This usually means the <a href="https://github.com/thatSFguy/reticulum-lora-transport" target="_blank">reticulum-lora-transport</a> repository is private or has no published releases yet. The flasher will start working as soon as the repo is public and a release with <code>firmware-*-v*.uf2</code> assets is published.
+</div>
+
+<div class="panel">
+  <h2>Flash firmware</h2>
+  <p style="margin: 0 0 12px 0; color: var(--muted); font-size: 13px;">
+    Pick the board you have, click <strong>Download UF2</strong>, then put the board in bootloader mode by
+    <strong>double-tapping the reset button</strong> on the board (within ~500&nbsp;ms). It will mount as a USB drive — drag the downloaded <code>.uf2</code> onto that drive. When the drive disappears, the board has rebooted into the new firmware.
+  </p>
+  <div class="row">
+    <div class="field narrow"><label>Latest version</label>
+      <div id="rel-version-label" class="stage-label" style="margin-top: 0;">loading…</div></div>
+    <div class="field"><label>Board</label>
+      <select id="rel-board" disabled><option>loading…</option></select></div>
+    <div>
+      <label>&nbsp;</label>
+      <button id="btn-download-uf2" disabled>Download UF2</button>
+    </div>
+  </div>
+  <div id="rel-status" class="stage-label"></div>
+
+  <div id="uf2-instructions" class="notice ok hidden" style="margin-top: 12px;">
+    <strong>UF2 download started.</strong>
+    Now double-tap the reset button on the board, wait for the bootloader USB drive to mount, and drag the <code>.uf2</code> file onto it.
+  </div>
+
+  <details style="margin-top: 18px;">
+    <summary style="cursor: pointer; color: var(--muted); font-size: 12px;">Advanced: flash a local <code>firmware.zip</code> over Web Serial DFU</summary>
+    <p style="color: var(--muted); font-size: 12px; margin-top: 8px;">
+      The transport CI does not currently publish DFU <code>.zip</code> packages, only UF2. If you have built one locally, upload it here. Web Serial DFU avoids the drag-and-drop step but is otherwise equivalent.
+    </p>
+    <div class="file-drop" style="margin-top: 8px;">
+      <input id="fw-file" type="file" accept=".zip,application/zip">
+    </div>
+    <div id="fw-info" class="stage-label">no firmware loaded</div>
+    <div class="actions">
+      <button id="btn-flash" disabled>Flash via DFU</button>
+      <span style="color: var(--muted); font-size: 12px; align-self: center;">
+        Double-tap reset, then pick the bootloader serial port in the prompt.
+      </span>
+    </div>
+    <div class="progress"><div id="fw-progress-bar"></div></div>
+    <div id="fw-stage" class="stage-label"></div>
+  </details>
+</div>
+
+<div class="panel">
+  <h2>Connect</h2>
+  <p style="margin: 0 0 12px 0; color: var(--muted); font-size: 13px;">
+    After flashing, connect to the running firmware to read and edit the persistent config. USB and Bluetooth speak the same msgpack protocol — pick whichever is convenient.
+  </p>
+  <div class="row">
+    <span id="conn-status"><span class="status-dot" id="conn-dot"></span><span id="conn-text">Disconnected</span></span>
+    <button id="btn-connect">Connect USB</button>
+    <button id="btn-connect-ble" class="secondary">Connect BLE</button>
+    <button id="btn-disconnect" class="secondary hidden">Disconnect</button>
+  </div>
+</div>
+
+<div id="live" class="hidden">
+
+  <div id="loading-overlay" class="notice" style="text-align:center;">
+    Loading configuration…
+  </div>
+
+  <div id="config-panel" class="panel hidden">
+    <h2>Device</h2>
+    <dl class="kv" style="margin-bottom: 18px;">
+      <dt>identity hash</dt><dd id="dev-identity">—</dd>
+      <dt>firmware version</dt><dd id="dev-version">—</dd>
+    </dl>
+
+    <h2>Configuration</h2>
+    <div class="row">
+      <div class="field"><label>display name</label>
+        <input id="cfg-display_name" type="text" maxlength="31"></div>
+    </div>
+    <div class="row">
+      <div class="field narrow"><label>freq (MHz)</label>
+        <input id="cfg-freq_mhz" type="number" min="100" max="1100" step="0.001" placeholder="e.g. 904.375"></div>
+      <div class="field narrow"><label>bandwidth (Hz)</label>
+        <select id="cfg-bw_hz">
+          <option value="7800">7.8 kHz</option>
+          <option value="10400">10.4 kHz</option>
+          <option value="15600">15.6 kHz</option>
+          <option value="20800">20.8 kHz</option>
+          <option value="31250">31.25 kHz</option>
+          <option value="41700">41.7 kHz</option>
+          <option value="62500">62.5 kHz</option>
+          <option value="125000">125 kHz</option>
+          <option value="250000">250 kHz</option>
+          <option value="500000">500 kHz</option>
+        </select></div>
+      <div class="field narrow"><label>spreading factor</label>
+        <select id="cfg-sf">
+          <option>5</option><option>6</option><option>7</option><option>8</option>
+          <option>9</option><option>10</option><option>11</option><option>12</option>
+        </select></div>
+      <div class="field narrow"><label>coding rate</label>
+        <select id="cfg-cr">
+          <option value="5">4/5</option>
+          <option value="6">4/6</option>
+          <option value="7">4/7</option>
+          <option value="8">4/8</option>
+        </select></div>
+      <div class="field narrow"><label>TX power (dBm)</label>
+        <input id="cfg-txp_dbm" type="number" min="-9" max="22" step="1"></div>
+    </div>
+    <div class="row">
+      <div class="field narrow"><label>latitude</label>
+        <input id="cfg-latitude" type="number" min="-90" max="90" step="0.000001" placeholder="e.g. 37.7749"></div>
+      <div class="field narrow"><label>longitude</label>
+        <input id="cfg-longitude" type="number" min="-180" max="180" step="0.000001" placeholder="e.g. -122.4194"></div>
+      <div class="field narrow"><label>altitude (m)</label>
+        <input id="cfg-altitude" type="number" min="-100000" max="100000" step="1" placeholder="0"></div>
+      <div class="field narrow"><label>battery multiplier</label>
+        <input id="cfg-batt_mult" type="number" min="0.1" max="10" step="0.001"></div>
+      <div>
+        <label>&nbsp;</label>
+        <button id="btn-geolocate" class="secondary" type="button">Use my location</button>
+      </div>
+    </div>
+    <div class="actions">
+      <button id="btn-commit">Apply &amp; Commit</button>
+      <button id="btn-refresh" class="secondary">Refresh from device</button>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h2>Log</h2>
+    <div id="log"></div>
+  </div>
+
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"
+        crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+<script src="js/dfu.js"></script>
+<script type="module" src="js/transport-flasher-app.js"></script>
+</body>
+</html>
