@@ -22,18 +22,34 @@ const SERIAL_BAUD       = 115200;
 const SERIAL_MAX_FRAME  = 1024;
 const RESPONSE_TIMEOUT  = 5000;
 
-// On the response side, get_config wire-emits all integers as msgpack
-// uints (per docs/transport_node_programming.md §3.3), so signed fields
-// arrive as uint32 bit patterns and must be re-cast to int32. Outbound
-// requests do NOT need this conversion — the firmware's read_int
-// accepts negative-fixint / int8/16/32/64 natively, and forcing the
-// uint32 bit pattern would now fail the per-field range check.
+// Signed-int fields on the wire. The v0.1.5 transport firmware (the
+// only release published as of this writing) reads these as uint32
+// and reinterprets the bit pattern as int32, so negative values must
+// be sent as their two's-complement uint32 — e.g. -9 → 0xFFFFFFF7.
+// get_config likewise wire-emits them as msgpack uints, so inbound
+// values must be re-cast to int32.
+//
+// The transport doc describes a v0.1.6 protocol where read_int accepts
+// native signed encoding directly; when that firmware actually ships,
+// drop encodeSignedFields and update setConfig accordingly. Until then
+// the bit-pattern hack is required or set_config rejects with
+// "malformed set_config payload" / out-of-range errors.
 const SIGNED_INT32_FIELDS = ['txp_dbm', 'lat_udeg', 'lon_udeg', 'alt_m'];
 
 function decodeSignedFields(obj) {
   const out = { ...obj };
   for (const k of SIGNED_INT32_FIELDS) {
     if (k in out && typeof out[k] === 'number') out[k] = (out[k] | 0);
+  }
+  return out;
+}
+
+function encodeSignedFields(obj) {
+  const out = { ...obj };
+  for (const k of SIGNED_INT32_FIELDS) {
+    if (k in out && typeof out[k] === 'number' && out[k] < 0) {
+      out[k] = (out[k] >>> 0); // two's-complement uint32
+    }
   }
   return out;
 }
@@ -202,11 +218,11 @@ class TransportClient {
   }
 
   // `fields` is an object containing any subset of the writable Config
-  // fields. JS numbers are passed through msgpack natively — negative
-  // ints encode as negative-fixint / int8/16/32, which the firmware's
-  // read_int accepts directly.
+  // fields. Negative values for SIGNED_INT32_FIELDS are converted to
+  // their two's-complement uint32 representation before encoding so
+  // the v0.1.5 firmware's read_int (uint-only) accepts them.
   async setConfig(fields) {
-    const r = await this.call({ cmd: 'set_config', ...fields });
+    const r = await this.call({ cmd: 'set_config', ...encodeSignedFields(fields) });
     if (!r.ok) throw new Error(r.err || 'set_config failed');
     return r;
   }
