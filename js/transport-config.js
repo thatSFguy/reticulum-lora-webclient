@@ -1,16 +1,16 @@
 // js/transport-config.js — driver for the reticulum-lora-transport
 // configuration protocol over Web Bluetooth (GATT) or Web Serial.
-// Wire format and command set are pinned in
-// docs/transport_node_programming.md; the firmware-side authoritative
-// reference is src/Ble.cpp / src/SerialConsole.cpp / src/ConfigProtocol.cpp
-// in the reticulum-lora-transport repo.
+// Wire format and command set live in the transport repo:
+//   ../reticulum-lora-transport/docs/transport_node_programming.md
+// Firmware-side authoritative reference is src/Ble.cpp /
+// src/SerialConsole.cpp / src/ConfigProtocol.cpp in that same repo.
 
 import { Encoder, decode } from '../lib/msgpack.js';
 
 // forceFloat32 makes the encoder emit msgpack 0xCA (float32) instead of
 // 0xCB (float64) for non-integer numbers. The transport firmware reads
 // batt_mult strictly as float32 and rejects float64 with
-// "malformed set_config payload" — see docs/transport_node_programming.md §4.
+// "malformed set_config payload" — see transport repo docs §4.
 const encoder = new Encoder({ forceFloat32: true });
 const encode  = (obj) => encoder.encode(obj);
 
@@ -23,7 +23,7 @@ const SERIAL_MAX_FRAME  = 1024;
 const RESPONSE_TIMEOUT  = 5000;
 
 // On the response side, get_config wire-emits all integers as msgpack
-// uints (per docs/transport_node_programming.md §3.3), so signed fields
+// uints (per transport repo docs §3.3), so signed fields
 // arrive as uint32 bit patterns and must be re-cast to int32. Outbound
 // requests do NOT need this conversion — the firmware's read_int
 // accepts negative-fixint / int8/16/32/64 natively, and forcing the
@@ -34,6 +34,27 @@ function decodeSignedFields(obj) {
   const out = { ...obj };
   for (const k of SIGNED_INT32_FIELDS) {
     if (k in out && typeof out[k] === 'number') out[k] = (out[k] | 0);
+  }
+  return out;
+}
+
+// Fields the firmware reads strictly as float32 (msgpack 0xCA). The
+// encoder's forceFloat32 option only chooses between float32 and
+// float64; it does NOT redirect integer-valued JS numbers through the
+// float path — Number.isSafeInteger(1.0) is true, so parseFloat("1.000")
+// would otherwise be wire-emitted as fixint(0x01) and rejected with
+// "malformed set_config payload". Nudging the value below float32
+// resolution forces the integer test to fail without changing the
+// 32-bit pattern that lands on the device.
+const FLOAT32_FIELDS = ['batt_mult'];
+
+function ensureFloatTypes(obj) {
+  const out = { ...obj };
+  for (const k of FLOAT32_FIELDS) {
+    const v = out[k];
+    if (typeof v === 'number' && Number.isSafeInteger(v)) {
+      out[k] = v === 0 ? Number.MIN_VALUE : v * (1 + Number.EPSILON);
+    }
   }
   return out;
 }
@@ -204,9 +225,11 @@ class TransportClient {
   // `fields` is an object containing any subset of the writable Config
   // fields. JS numbers are passed through msgpack natively — negative
   // ints encode as negative-fixint / int8/16/32, which the firmware's
-  // read_int accepts directly.
+  // read_int accepts directly. ensureFloatTypes nudges integer-valued
+  // float32 fields off the safe-integer path so the encoder routes
+  // them through the float branch.
   async setConfig(fields) {
-    const r = await this.call({ cmd: 'set_config', ...fields });
+    const r = await this.call({ cmd: 'set_config', ...ensureFloatTypes(fields) });
     if (!r.ok) throw new Error(r.err || 'set_config failed');
     return r;
   }

@@ -3,7 +3,7 @@
 // user download the matching UF2 (drag-and-drop install path) or
 // Web-Serial-DFU-flash a locally uploaded firmware.zip, and after the
 // device is running, configures it over BLE or Web Serial via the
-// msgpack protocol in docs/transport_node_programming.md.
+// msgpack protocol in ../reticulum-lora-transport/docs/transport_node_programming.md.
 
 import {
   TransportClient,
