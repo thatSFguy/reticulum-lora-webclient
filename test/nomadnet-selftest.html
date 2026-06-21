@@ -35,7 +35,8 @@ import { bunzip2 } from '../lib/bz2.js';
 import { renderMicron } from '../js/micron.js';
 import { encode as mp } from '@msgpack/msgpack';
 import { buildRequest, parseResponse, parseLinkTarget, stripPageHeaders, requestPathHash } from '../js/nomadnet.js';
-import { parseAdvertisement } from '../js/resource.js';
+import { parseAdvertisement, ResourceSender, ResourceReceiver, CTX_RESOURCE, CTX_RESOURCE_ADV, CTX_RESOURCE_REQ, CTX_RESOURCE_HMU, CTX_RESOURCE_PRF } from '../js/resource.js';
+import { tokenEncrypt, tokenDecrypt } from '../js/crypto.js';
 import { decode as mpDecode } from '@msgpack/msgpack';
 
 const results = document.getElementById('results');
@@ -109,8 +110,58 @@ try {
   check('micron: link with data-target', html.includes('data-target="/page/next.mu"') && html.includes('mu-link'));
   check('micron: divider', html.includes('mu-hr'));
   check('micron: escapes html', renderMicron('a <script> b').includes('&lt;script&gt;'));
+
+  // ---- Resource sender <-> receiver round-trip ----
+  // Loopback the two halves over a mock link (real Token crypto) and confirm
+  // a multi-part payload survives encode -> request -> parts -> reassemble.
+  for (const size of [50, 5000, 40000]) {
+    const ok = await resourceRoundTrip(size);
+    check(`resource round-trip ${size}B`, ok === true, String(ok));
+  }
 } catch (e) {
   check('FATAL', false, e.message + '\n' + e.stack);
+}
+
+async function resourceRoundTrip(size) {
+  const key = new Uint8Array(64); crypto.getRandomValues(key);
+  const link = {
+    linkId: new Uint8Array(16),
+    encrypt: (pt) => tokenEncrypt(key, pt),
+    decrypt: (ct) => tokenDecrypt(key, ct),
+  };
+  const data = new Uint8Array(size);
+  crypto.getRandomValues(data);
+
+  let receiver = null;
+  let assembled = null, failure = null;
+
+  const receiverSend = async (ctx, payload, isProof) => {
+    if (isProof) { sender.handleProof(payload); return; }       // RESOURCE_PRF
+    if (ctx === CTX_RESOURCE_REQ) await sender.handleRequest(await link.decrypt(payload));
+  };
+  const senderSend = async (ctx, payload, isProof) => {
+    if (ctx === CTX_RESOURCE_ADV) {
+      const adv = parseAdvertisement(await link.decrypt(payload));
+      receiver = new ResourceReceiver(link, adv, {
+        send: receiverSend,
+        onComplete: ({ data: d }) => { assembled = d; },
+        onError: (r) => { failure = r; },
+      });
+      receiver.start();
+    } else if (ctx === CTX_RESOURCE) {
+      await receiver.handlePart(payload);                       // raw slice
+    } else if (ctx === CTX_RESOURCE_HMU) {
+      receiver.handleHashmapUpdate(await link.decrypt(payload));
+    }
+  };
+
+  const sender = new ResourceSender(link, data, { send: senderSend });
+  await sender.start();
+  // Allow the await-chained loopback to settle.
+  for (let i = 0; i < 50 && !assembled && !failure; i++) await new Promise((r) => setTimeout(r, 5));
+  if (failure) return failure;
+  if (!assembled) return 'timed out (no assembly)';
+  return eqBytes(assembled, data) ? true : `mismatch (${assembled.length} vs ${size})`;
 }
 
 const s = document.getElementById('summary');

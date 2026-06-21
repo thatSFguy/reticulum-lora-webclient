@@ -17,7 +17,7 @@
 
 'use strict';
 
-import { decode as msgpackDecode } from '@msgpack/msgpack';
+import { decode as msgpackDecode, encode as msgpackEncode } from '@msgpack/msgpack';
 import { sha256 } from './identity.js';
 import { concatBytes, arraysEqual } from './announce.js';
 import { bunzip2 } from '../lib/bz2.js';
@@ -281,4 +281,134 @@ function hex(bytes) {
   let s = '';
   for (let i = 0; i < bytes.length; i++) s += bytes[i].toString(16).padStart(2, '0');
   return s;
+}
+
+function randomBytes(n) {
+  const b = new Uint8Array(n);
+  crypto.getRandomValues(b);
+  return b;
+}
+
+// Part slice size: must fit a HEADER_1 link DATA packet (19B header) within
+// MTU 500. RNS uses mtu - HEADER_MAXSIZE - IFAC_MIN_SIZE; 464 is the same
+// conservative bound and is sender-internal (the receiver reassembles by
+// hashmap order regardless).
+const SDU = 464;
+// Map hashes that fit in the first advertisement (rest via RESOURCE_HMU).
+const HASHMAP_MAX_LEN = 74;
+
+// Sender side of the Resource protocol (SPEC §10.2–10.8). We send
+// UNCOMPRESSED (flag c=0) so no bz2 *compressor* is needed. The payload is
+// link-encrypted once as a whole, then sliced into raw parts.
+//
+//   link    — active Link (its session key encrypts the whole blob)
+//   data    — Uint8Array plaintext to deliver
+//   opts.send(context, payload, isProof) — emit a link packet. The caller
+//     link-encrypts ADV/HMU, sends RESOURCE parts RAW, PROOF unencrypted.
+//   opts.requestId / opts.isResponse / opts.isRequest — for REQUEST/RESPONSE
+//   opts.onComplete() — peer returned a valid proof
+//   opts.onError(reason)
+export class ResourceSender {
+  constructor(link, data, opts) {
+    this.link = link;
+    this.data = data;
+    this.send = opts.send;
+    this.requestId = opts.requestId || null;
+    this.isResponse = !!opts.isResponse;
+    this.isRequest = !!opts.isRequest;
+    this.onComplete = opts.onComplete || (() => {});
+    this.onError = opts.onError || (() => {});
+    this.done = false;
+  }
+
+  async start() {
+    const data = this.data;
+    this.randomHash = randomBytes(RANDOM_HASH_SIZE);  // adv.r — integrity/hashmap salt
+
+    // §10.2: a fresh 4-byte throwaway prefix travels inside the encrypted
+    // blob (distinct from randomHash); receiver strips & discards it.
+    const blob = concatBytes([randomBytes(RANDOM_HASH_SIZE), data]);
+    const encrypted = await this.link.encrypt(blob);
+
+    // Hash/proof are over the ORIGINAL plaintext + randomHash (not the prefix,
+    // not the encrypted form) so both sides agree (§10.2 step 5 / §10.8).
+    this.hash = await sha256(concatBytes([data, this.randomHash]));
+    this.expectedProof = await sha256(concatBytes([data, this.hash]));
+
+    // Slice the encrypted whole into parts; fingerprint each to a 4-byte map hash.
+    this.parts = [];
+    for (let off = 0; off < encrypted.length; off += SDU) {
+      this.parts.push(encrypted.subarray(off, off + SDU));
+    }
+    if (this.parts.length === 0) this.parts.push(new Uint8Array(0));
+    this.totalParts = this.parts.length;
+
+    this.mapHashes = [];
+    this.partByMapHash = new Map();
+    for (let i = 0; i < this.totalParts; i++) {
+      const mh = (await sha256(concatBytes([this.parts[i], this.randomHash]))).subarray(0, MAPHASH_LEN);
+      this.mapHashes.push(mh);
+      this.partByMapHash.set(hex(mh), this.parts[i]);
+    }
+
+    let f = FLAG_ENCRYPTED;
+    if (this.isRequest) f |= FLAG_IS_REQUEST;
+    if (this.isResponse) f |= FLAG_IS_RESPONSE;
+
+    const firstCount = Math.min(this.totalParts, HASHMAP_MAX_LEN);
+    const adv = {
+      t: encrypted.length, d: data.length, n: this.totalParts,
+      h: this.hash, r: this.randomHash, o: this.hash, i: 1, l: 1,
+      q: this.requestId, f, m: concatBytes(this.mapHashes.slice(0, firstCount)),
+    };
+    await this.send(CTX_RESOURCE_ADV, new Uint8Array(msgpackEncode(adv)), false);
+  }
+
+  // RESOURCE_REQ (0x03): serve the requested parts, and the next hashmap
+  // segment if the receiver exhausted what it knows (§10.5/§10.7).
+  async handleRequest(plaintext) {
+    if (this.done) return;
+    let off = 0;
+    const exhausted = plaintext[off]; off += 1;
+    let lastMapHash = null;
+    if (exhausted === HASHMAP_IS_EXHAUSTED) { lastMapHash = plaintext.subarray(off, off + MAPHASH_LEN); off += MAPHASH_LEN; }
+    const resHash = plaintext.subarray(off, off + 32); off += 32;
+    if (!arraysEqual(resHash, this.hash)) return;  // not ours
+
+    for (; off + MAPHASH_LEN <= plaintext.length; off += MAPHASH_LEN) {
+      const part = this.partByMapHash.get(hex(plaintext.subarray(off, off + MAPHASH_LEN)));
+      if (part) await this.send(CTX_RESOURCE, part, false);  // raw slice
+    }
+
+    if (exhausted === HASHMAP_IS_EXHAUSTED && lastMapHash) {
+      const idx = this.mapHashes.findIndex((m) => arraysEqual(m, lastMapHash));
+      if (idx >= 0) {
+        const segStart = idx + 1;
+        const seg = this.mapHashes.slice(segStart, segStart + HASHMAP_MAX_LEN);
+        if (seg.length) {
+          const body = concatBytes([this.hash, new Uint8Array(msgpackEncode([Math.floor(segStart / HASHMAP_MAX_LEN), concatBytes(seg)]))]);
+          await this.send(CTX_RESOURCE_HMU, body, false);
+        }
+      }
+    }
+  }
+
+  // RESOURCE_PRF (0x05): resource_hash(32) || full_proof(32).
+  handleProof(proofData) {
+    if (this.done) return;
+    if (!arraysEqual(proofData.subarray(0, 32), this.hash)) return;  // not ours
+    if (arraysEqual(proofData.subarray(32, 64), this.expectedProof)) {
+      this.done = true;
+      this.onComplete();
+    } else {
+      this.done = true;
+      this.onError('resource proof mismatch');
+    }
+  }
+
+  cancel(reason = 'cancelled') {
+    if (this.done) return;
+    this.done = true;
+    this.onError(reason);
+  }
 }

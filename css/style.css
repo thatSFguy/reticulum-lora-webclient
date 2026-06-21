@@ -1809,3 +1809,28 @@ textarea:focus {
 }
 .modal-hint.ok { color: var(--accent-text); }
 .modal-hint.err { color: var(--err); }
+
+/* ---- Message attachments ------------------------------------------- */
+.attach-btn {
+  flex: 0 0 auto;
+  background: none; border: none; cursor: pointer;
+  font-size: 18px; line-height: 1; padding: 6px;
+  color: var(--text-2); align-self: flex-end;
+}
+.attach-btn:hover { color: var(--text); }
+.att-image-link { display: block; }
+.att-image {
+  max-width: 220px; max-height: 220px;
+  border-radius: 10px; display: block; margin-bottom: 4px;
+  object-fit: cover; cursor: pointer;
+}
+.att-audio { display: block; width: 220px; margin-bottom: 4px; }
+.att-file {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 8px 12px; margin-bottom: 4px;
+  background: var(--surface-hover); border-radius: 10px;
+  color: var(--text); text-decoration: none; font-size: 13px;
+}
+.att-file:hover { background: var(--surface-2); }
+.att-size { color: var(--text-muted); font-size: 11px; }
+.message.outgoing .att-file { background: rgba(255,255,255,0.18); color: var(--bubble-out-text); }

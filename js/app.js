@@ -15,7 +15,7 @@ import { Link, LINK_ACTIVE, LINK_CLOSED, computePacketFullHash } from './link.js
 import { lookupDestination } from './known-destinations.js';
 import { ed25519 } from '@noble/curves/ed25519';
 import { CTX_REQUEST, CTX_RESPONSE, NN_DEFAULT_PATH, buildRequest, parseResponse, responseToText, stripPageHeaders, parseLinkTarget } from './nomadnet.js';
-import { ResourceReceiver, parseAdvertisement, CTX_RESOURCE, CTX_RESOURCE_ADV, CTX_RESOURCE_HMU, CTX_RESOURCE_ICL } from './resource.js';
+import { ResourceReceiver, ResourceSender, parseAdvertisement, CTX_RESOURCE, CTX_RESOURCE_ADV, CTX_RESOURCE_REQ, CTX_RESOURCE_HMU, CTX_RESOURCE_PRF, CTX_RESOURCE_ICL, CTX_RESOURCE_RCL } from './resource.js';
 import { renderMicron } from './micron.js';
 
 // Reticulum packet context values relevant to link traffic
@@ -304,6 +304,9 @@ async function onPacket(data, rssi, snr) {
     //      Matched by handleDeliveryProof against saved outgoing rows.
     if (pkt.context === CTX_LRPROOF) {
       await handleInitiatorLinkProof(pkt);
+    } else if (pkt.context === CTX_RESOURCE_PRF) {
+      // Proof that a Resource we SENT was received intact (§10.8).
+      links.get(toHex(pkt.destHash))?._resourceSender?.handleProof(pkt.payload);
     } else if (pkt.destType === DEST_LINK) {
       await handleLinkDeliveryProof(pkt);
     } else {
@@ -1227,6 +1230,11 @@ async function dispatchIncomingMessage(msg, rxInfo) {
     headerType: rxInfo.headerType,
     dupeCount: 1,
   };
+  // Pull out any image/file/audio attachment for rendering.
+  try {
+    const att = await attachmentFromFields(msg.fields);
+    if (att) savedMsg.attachment = att;
+  } catch (e) { log('info', `  (attachment parse failed: ${e.message})`); }
   const dbId = await saveMessage(savedMsg);
   conversedHashes.add(savedMsg.contactHash);  // surface this thread in Messages
   log('info', `  Saved under contactHash=${savedMsg.contactHash.substring(0, 16)}... activeContact=${activeContactHash ? activeContactHash.substring(0, 16) + '...' : '(none)'}`);
@@ -1310,6 +1318,7 @@ async function handleLinkData(pkt, rxInfo) {
     log('info', `  DATA for unknown link ${linkIdHex.substring(0,16)}..., ignoring`);
     return;
   }
+  link._rxInfo = rxInfo;  // remembered for an LXMF resource's onComplete dispatch
 
   try {
     switch (pkt.context) {
@@ -1426,6 +1435,16 @@ async function handleLinkData(pkt, rxInfo) {
       }
       case CTX_RESOURCE_ICL: {
         if (link._resource) link._resource.cancel('sender cancelled the resource');
+        break;
+      }
+      case CTX_RESOURCE_REQ: {
+        // Part request for a Resource we're SENDING (§10.5).
+        const plaintext = await link.decrypt(pkt.payload);
+        if (link._resourceSender) await link._resourceSender.handleRequest(plaintext);
+        break;
+      }
+      case CTX_RESOURCE_RCL: {
+        if (link._resourceSender) link._resourceSender.cancel('peer rejected the resource');
         break;
       }
       default: {
@@ -1734,14 +1753,23 @@ async function nnEnsureLink(destHashHex) {
   return link;
 }
 
-// The send callback the ResourceReceiver uses to emit REQ/PRF/RCL packets.
-function nnResourceSend(link) {
+// Unified send callback for Resource traffic on a link (used by both the
+// receiver — REQ/PRF/RCL — and the sender — ADV/RESOURCE/HMU). Encryption
+// rules (§10.3/§10.6): RESOURCE part slices (0x01) are raw (already part of
+// the encrypted whole); PROOF packets are unencrypted; everything else is a
+// DATA packet link-encrypted with the session key.
+function makeResourceSend(link) {
   return async (context, payload, isProof) => {
     let packet;
     if (isProof) {
       packet = buildPacket({
         headerType: HEADER_1, destType: DEST_LINK, packetType: PACKET_PROOF,
         destHash: link.linkId, context, payload,
+      });
+    } else if (context === CTX_RESOURCE) {
+      packet = buildPacket({
+        headerType: HEADER_1, destType: DEST_LINK, packetType: PACKET_DATA,
+        destHash: link.linkId, context, payload,   // raw slice — not re-encrypted
       });
     } else {
       const enc = await link.encrypt(payload);
@@ -1756,28 +1784,33 @@ function nnResourceSend(link) {
 
 // Create and start a Resource receiver for an inbound advertisement.
 function startResourceReceive(link, adv) {
-  // Only the browser drives resources today. An advertisement on a link
-  // with no pending page request is something else (e.g. a large inbound
-  // LXMF message over a responder link) — out of scope; don't misparse it.
-  if (!link._nnRequest) {
-    log('info', `  Resource advertised on link ${toHex(link.linkId).substring(0,12)}... with no pending request — ignoring`);
-    return;
-  }
   if (link._resource) { link._resource.cancel('superseded'); }
-  nnSetStatus(`receiving page (${adv.parts} parts)…`);
+
+  // Two kinds of inbound Resource: a NomadNet page RESPONSE (we have a
+  // pending request on this link) or a large LXMF message delivered to us.
+  const isPage = !!link._nnRequest;
+  if (isPage) nnSetStatus(`receiving page (${adv.parts} parts)…`);
+  else log('info', `  Receiving LXMF resource (${adv.parts} parts) on link ${toHex(link.linkId).substring(0,12)}...`);
+
   link._resource = new ResourceReceiver(link, adv, {
-    send: nnResourceSend(link),
-    onProgress: (frac) => nnSetStatus(`receiving page… ${Math.round(frac * 100)}%`),
-    onError: (reason) => { link._resource = null; nnSetStatus(reason, 'err'); },
+    send: makeResourceSend(link),
+    onProgress: (frac) => { if (isPage) nnSetStatus(`receiving page… ${Math.round(frac * 100)}%`); },
+    onError: (reason) => { link._resource = null; if (isPage) nnSetStatus(reason, 'err'); else log('err', `  LXMF resource failed: ${reason}`); },
     onComplete: async ({ data }) => {
       link._resource = null;
       try {
-        // A page RESPONSE delivered as a Resource carries the packed
-        // [request_id, response] envelope (§11.2).
-        const { requestId, response } = parseResponse(data);
-        await handleNomadNetResponse(link, requestId, response);
+        if (isPage) {
+          // Page RESPONSE: the packed [request_id, response] envelope (§11.2).
+          const { requestId, response } = parseResponse(data);
+          await handleNomadNetResponse(link, requestId, response);
+        } else {
+          // Large LXMF message: the link-form container (dest+source+sig+payload).
+          const msg = await unpackLinkMessage(data);
+          log('ok', `  Link ${toHex(link.linkId).substring(0,12)}... delivered LXMF resource`);
+          await dispatchIncomingMessage(msg, link._rxInfo || { rssi: null, snr: null, hops: 0, headerType: 0 });
+        }
       } catch (e) {
-        nnSetStatus(`failed to parse page: ${e.message}`, 'err');
+        log('err', `  Resource assembly handling failed: ${e.message}`);
       }
     },
   });
@@ -2075,6 +2108,151 @@ async function sendMessage() {
   } catch (e) {
     log('err', `Send failed: ${e.message}`);
   }
+}
+
+// ---- Attachments (files / images) over a Link --------------------------
+//
+// Attachments never fit one packet, so they go over a Link as a Resource
+// (SPEC §5.9 / §10): pack the LXMF with the attachment field, link-encrypt
+// the full container, and send it as a single link packet if it fits or as
+// a Resource otherwise.
+
+// Read either a Map- or object-shaped msgpack field map.
+function getField(fields, key) {
+  if (!fields) return undefined;
+  return fields instanceof Map ? fields.get(key) : (fields[key] ?? fields[String(key)]);
+}
+
+function blobToDataUrl(blob) {
+  return new Promise((resolve, reject) => {
+    const fr = new FileReader();
+    fr.onload = () => resolve(fr.result);
+    fr.onerror = () => reject(fr.error);
+    fr.readAsDataURL(blob);
+  });
+}
+
+// Sanitize an untrusted attachment filename (SPEC §5.9.7): strip path
+// separators, ".." and control chars before display/download.
+function sanitizeFilename(name) {
+  return (String(name || '').replace(/[\\/]/g, '_').replace(/\.\./g, '_').replace(/[\x00-\x1f]/g, '').trim().slice(0, 120)) || 'file';
+}
+
+// Downscale + re-encode an image to keep LoRa transfers small. Longest side
+// capped at maxDim, JPEG at the given quality. Returns { bytes, ext, dataUrl }.
+async function resizeImage(file, maxDim = 512, quality = 0.5) {
+  const bmp = await createImageBitmap(file);
+  const scale = Math.min(1, maxDim / Math.max(bmp.width, bmp.height));
+  const w = Math.max(1, Math.round(bmp.width * scale));
+  const h = Math.max(1, Math.round(bmp.height * scale));
+  const canvas = document.createElement('canvas');
+  canvas.width = w; canvas.height = h;
+  canvas.getContext('2d').drawImage(bmp, 0, 0, w, h);
+  bmp.close?.();
+  const blob = await new Promise((r) => canvas.toBlob(r, 'image/jpeg', quality));
+  const bytes = new Uint8Array(await blob.arrayBuffer());
+  return { bytes, ext: 'jpg', dataUrl: await blobToDataUrl(blob) };
+}
+
+// Send a packed LXMF (with optional attachment fields) to a contact over a
+// Link. Returns true if confirmed delivered (Resource proof), false if sent
+// as a single packet (delivery proof, if any, arrives async). Throws on error.
+async function sendLxmfOverLink(contact, content, title, fields) {
+  if (!radioOn) throw new Error('Radio is off');
+  const link = await openLinkToContact(contact);
+  const packed = await packMessage(myIdentity, contact.destHash, myDestHash, title || '', content || '', fields || new Map());
+  const destBytes = contact.destHash instanceof Uint8Array ? contact.destHash : new Uint8Array(contact.destHash);
+  const container = concatBytes([destBytes, packed]);  // link form keeps the dest hash
+  const encrypted = await link.encrypt(container);
+  // Conservative single-link-packet content cap (token overhead + header).
+  if (encrypted.length <= 380) {
+    await sendViaLink(link, container);
+    return false;
+  }
+  await new Promise((resolve, reject) => {
+    const sender = new ResourceSender(link, container, {
+      send: makeResourceSend(link),
+      onComplete: resolve,
+      onError: (r) => reject(new Error(r)),
+    });
+    link._resourceSender = sender;
+    sender.start().catch(reject);
+  });
+  return true;
+}
+
+// Attach + send a file (image or generic file) to the active conversation.
+async function sendAttachment(file) {
+  if (!activeContactHash) return;
+  const contact = contacts.get(activeContactHash);
+  if (!contact || !contact.identity) {
+    log('err', 'Cannot send an attachment — recipient public key unknown (need their announce).');
+    return;
+  }
+  if (!radioOn) { log('err', 'Connect first to send attachments.'); return; }
+
+  let fields = new Map();
+  let descriptor;
+  try {
+    if (file.type.startsWith('image/')) {
+      const { bytes, ext, dataUrl } = await resizeImage(file);
+      fields.set(0x06, [ext, bytes]);                    // FIELD_IMAGE = [ext, bytes]
+      descriptor = { kind: 'image', name: file.name, mime: 'image/jpeg', size: bytes.length, dataUrl };
+    } else {
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      const name = sanitizeFilename(file.name);
+      fields.set(0x05, [[name, bytes]]);                 // FIELD_FILE_ATTACHMENTS = [[name, bytes]]
+      descriptor = { kind: 'file', name, mime: file.type || 'application/octet-stream', size: bytes.length, dataUrl: await blobToDataUrl(file) };
+    }
+  } catch (e) {
+    log('err', `Could not read attachment: ${e.message}`);
+    return;
+  }
+
+  const row = {
+    contactHash: activeContactHash, direction: 'outgoing',
+    content: '', title: '', timestamp: Date.now(),
+    state: MSG_STATE_SENDING, attachment: descriptor, attempts: 0, nextRetryAt: 0,
+  };
+  const id = await saveMessage(row);
+  conversedHashes.add(activeContactHash);
+  await renderMessages(activeContactHash);
+
+  log('info', `Sending ${descriptor.kind} "${descriptor.name}" (${descriptor.size}B) to "${contact.displayName}"…`);
+  try {
+    const delivered = await sendLxmfOverLink(contact, '', '', fields);
+    await updateMessage(id, { state: delivered ? MSG_STATE_DELIVERED : MSG_STATE_SENT });
+    log('ok', `Attachment ${delivered ? 'delivered' : 'sent'}`);
+  } catch (e) {
+    await updateMessage(id, { state: MSG_STATE_FAILED, lastError: e.message });
+    log('err', `Attachment send failed: ${e.message}`);
+  }
+  if (activeContactHash === row.contactHash) await renderMessages(activeContactHash);
+}
+
+// Extract a renderable attachment descriptor from a decoded LXMF fields map.
+async function attachmentFromFields(fields) {
+  const img = getField(fields, 0x06);
+  if (Array.isArray(img) && img.length >= 2) {
+    const ext = typeof img[0] === 'string' ? img[0] : new TextDecoder().decode(img[0] || new Uint8Array());
+    const bytes = img[1] instanceof Uint8Array ? img[1] : new Uint8Array(img[1] || []);
+    const mime = ext === 'png' ? 'image/png' : ext === 'webp' ? 'image/webp' : 'image/jpeg';
+    return { kind: 'image', name: `image.${ext || 'jpg'}`, mime, size: bytes.length, dataUrl: await blobToDataUrl(new Blob([bytes], { type: mime })) };
+  }
+  const files = getField(fields, 0x05);
+  if (Array.isArray(files) && files.length && Array.isArray(files[0])) {
+    const [rawName, rawBytes] = files[0];
+    const name = sanitizeFilename(typeof rawName === 'string' ? rawName : new TextDecoder().decode(rawName || new Uint8Array()));
+    const bytes = rawBytes instanceof Uint8Array ? rawBytes : new Uint8Array(rawBytes || []);
+    return { kind: 'file', name, mime: 'application/octet-stream', size: bytes.length, dataUrl: await blobToDataUrl(new Blob([bytes])) };
+  }
+  const audio = getField(fields, 0x07);
+  if (Array.isArray(audio) && audio.length >= 2) {
+    // Audio receive is best-effort: wrap the bytes and let the browser try.
+    const bytes = audio[1] instanceof Uint8Array ? audio[1] : new Uint8Array(audio[1] || []);
+    return { kind: 'audio', name: 'audio', mime: 'audio/ogg', size: bytes.length, dataUrl: await blobToDataUrl(new Blob([bytes], { type: 'audio/ogg' })) };
+  }
+  return null;
 }
 
 // Compute the 16-byte truncated SHA-256 of the hashable part of a
@@ -2763,10 +2941,26 @@ async function renderMessages(contactHash) {
     const time = ts != null ? formatMessageTime(ts) : '(no time)';
     const stateIcon = renderOutgoingStateIcon(msg);
     const rxMeta = renderIncomingRxMeta(msg);
-    div.innerHTML = `<div>${escapeHtml(msg.content)}</div><div class="meta">${time}${stateIcon}${rxMeta}</div>`;
+    const body = msg.content ? `<div>${escapeHtml(msg.content)}</div>` : '';
+    div.innerHTML = `${renderAttachment(msg.attachment)}${body}<div class="meta">${time}${stateIcon}${rxMeta}</div>`;
     list.appendChild(div);
   }
   list.scrollTop = list.scrollHeight;
+}
+
+// Render an attachment descriptor (image preview, file download, or audio
+// player) as HTML inside a message bubble. dataUrl is a self-contained
+// data: URI so nothing is fetched from the network.
+function renderAttachment(att) {
+  if (!att || !att.dataUrl) return '';
+  const kb = att.size ? ` <span class="att-size">${(att.size / 1024).toFixed(1)} KB</span>` : '';
+  if (att.kind === 'image') {
+    return `<a href="${att.dataUrl}" target="_blank" rel="noopener" class="att-image-link"><img class="att-image" src="${att.dataUrl}" alt="${escapeHtml(att.name)}"></a>`;
+  }
+  if (att.kind === 'audio') {
+    return `<audio class="att-audio" controls src="${att.dataUrl}"></audio>`;
+  }
+  return `<a class="att-file" href="${att.dataUrl}" download="${escapeHtml(att.name)}">📎 ${escapeHtml(att.name)}${kb}</a>`;
 }
 
 // Radio metadata for incoming messages: hops, RSSI, SNR, and dupe count.
@@ -3359,6 +3553,13 @@ $('btn-export-id').addEventListener('click', () => {
 $('btn-send').addEventListener('click', sendMessage);
 $('msg-content').addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); }
+});
+// Attachments: file/image picker → send over a Link as a Resource.
+$('btn-attach')?.addEventListener('click', () => $('attach-input')?.click());
+$('attach-input')?.addEventListener('change', (e) => {
+  const f = e.target.files && e.target.files[0];
+  if (f) sendAttachment(f);
+  e.target.value = '';  // allow re-picking the same file
 });
 
 // Log
