@@ -2505,10 +2505,10 @@ function setTheme(choice) {
 // mobile hero, settings). Toggle them all at once by class so they
 // stay in sync regardless of which one the user clicked.
 function setConnectButtonsDisabled(disabled) {
-  document.querySelectorAll('.js-connect-btn').forEach(b => { b.disabled = disabled; });
+  document.querySelectorAll('.js-connect-btn, .js-tcp-connect').forEach(b => { b.disabled = disabled; });
 }
 function setConnectButtonsHidden(hidden) {
-  document.querySelectorAll('.js-connect-btn').forEach(b => {
+  document.querySelectorAll('.js-connect-btn, .js-tcp-connect').forEach(b => {
     b.classList.toggle('hidden', hidden);
   });
 }
@@ -2631,6 +2631,37 @@ function showBridgeModal(baseUrl) {
   // Auto-reconnect the moment the bridge starts listening.
   stopBridgePoll();
   bridgePollTimer = setInterval(() => { attemptBridgeReconnect(baseUrl); }, 2500);
+}
+
+// ---- TCP connect dialog (main-screen entry point) -------------------
+//
+// Lets the user connect over TCP without opening Settings. Mirrors the
+// entered values into the canonical ws-url/ws-rnsd fields that connect()
+// reads (and persists), then connects.
+
+function openTcpModal() {
+  const m = $('tcp-modal');
+  if (!m) return;
+  // Prefill from the persisted Settings fields so nothing is re-typed.
+  const url = ($('ws-url')?.value || '').trim();
+  const rnsd = ($('ws-rnsd')?.value || '').trim();
+  if (url) $('tcp-url').value = url;
+  if (rnsd) $('tcp-rnsd').value = rnsd;
+  m.classList.remove('hidden');
+  setTimeout(() => $('tcp-rnsd')?.focus(), 50);
+}
+
+function hideTcpModal() { $('tcp-modal')?.classList.add('hidden'); }
+
+function tcpConnect() {
+  const url = ($('tcp-url')?.value || '').trim();
+  const rnsd = ($('tcp-rnsd')?.value || '').trim();
+  if (!url) { log('err', 'WebSocket bridge URL is empty'); return; }
+  // connect('ws') reads these two fields and persists them to localStorage.
+  if ($('ws-url')) $('ws-url').value = url;
+  if ($('ws-rnsd')) $('ws-rnsd').value = rnsd;
+  hideTcpModal();
+  connect('ws');
 }
 
 // Connect
@@ -2879,6 +2910,14 @@ $('btn-clear-nodes').addEventListener('click', async () => {
   renderNodesList();
   log('info', 'Cleared all nodes');
 });
+
+// TCP connect dialog (opened from the main-screen "Connect via TCP" buttons).
+document.querySelectorAll('.js-tcp-connect').forEach(b => b.addEventListener('click', openTcpModal));
+$('tcp-cancel')?.addEventListener('click', hideTcpModal);
+$('tcp-connect')?.addEventListener('click', tcpConnect);
+['tcp-url', 'tcp-rnsd'].forEach(id => $(id)?.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') { e.preventDefault(); tcpConnect(); }
+}));
 
 // Bridge-not-running modal controls.
 $('bridge-close')?.addEventListener('click', hideBridgeModal);

@@ -46,6 +46,10 @@
           <svg viewBox="0 0 16 16"><rect x="5" y="1.5" width="6" height="6" rx="0.5" stroke="currentColor" stroke-width="1.3" fill="none"/><path d="M8 7.5v5M6 11h4v3H6z" stroke="currentColor" stroke-width="1.3" fill="none" stroke-linejoin="round"/></svg>
           <span>Connect via USB</span>
         </button>
+        <button class="quick-connect-btn js-tcp-connect" data-transport="ws">
+          <svg viewBox="0 0 16 16"><rect x="2" y="4" width="12" height="8" rx="1" stroke="currentColor" stroke-width="1.3" fill="none"/><path d="M5 8h6M8 6v4" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>
+          <span>Connect via TCP</span>
+        </button>
       </div>
     </div>
 
@@ -101,7 +105,7 @@
           <p class="mobile-connect-label">Not connected yet</p>
           <button class="btn-primary btn-block js-connect-btn" data-transport="ble">Connect via Bluetooth</button>
           <button class="btn-secondary btn-block js-connect-btn" data-transport="serial">Connect via USB (Serial)</button>
-          <p class="mobile-connect-hint">For a remote <code>rnsd</code> daemon, open Settings → Connect.</p>
+          <button class="btn-secondary btn-block js-tcp-connect" data-transport="ws">Connect via TCP (rnsd)</button>
         </div>
         <div class="contact-filter">
           <input id="contact-search" class="contact-search" type="search" placeholder="Search contacts…" autocomplete="off" />
@@ -530,6 +534,35 @@
     </button>
   </nav>
 
+</div>
+
+<!-- TCP / rnsd connection dialog (reachable from the main screen so
+     Settings isn't required to connect over TCP). -->
+<div id="tcp-modal" class="modal-overlay hidden">
+  <div class="modal">
+    <h2 class="modal-title">Connect via TCP</h2>
+    <p class="modal-text">
+      Reach a Reticulum daemon (<code>rnsd</code>) through a local WebSocket
+      bridge. Leave the bridge URL as-is for a bridge on this machine.
+    </p>
+    <div class="field wide">
+      <label>WebSocket bridge URL</label>
+      <input id="tcp-url" type="text" value="ws://localhost:7878" placeholder="ws://localhost:7878"
+             autocomplete="off" autocapitalize="off" spellcheck="false">
+    </div>
+    <div class="field wide">
+      <label>Reticulum daemon (host:port)</label>
+      <input id="tcp-rnsd" type="text" placeholder="e.g. rns.michmesh.net:7822"
+             autocomplete="off" autocapitalize="off" spellcheck="false">
+    </div>
+    <div class="modal-actions">
+      <span class="modal-hint">No bridge running? You'll get a one-click download next.</span>
+      <div class="modal-buttons">
+        <button id="tcp-cancel" class="btn-secondary">Cancel</button>
+        <button id="tcp-connect" class="btn-primary">Connect</button>
+      </div>
+    </div>
+  </div>
 </div>
 
 <!-- Bridge-not-detected helper (shown when a local WebSocket/TCP
