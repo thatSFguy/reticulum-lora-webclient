@@ -2183,29 +2183,42 @@ async function sendLxmfOverLink(contact, content, title, fields) {
 
 // Attach + send a file (image or generic file) to the active conversation.
 async function sendAttachment(file) {
-  if (!activeContactHash) return;
+  // Surface why an attachment can't be sent instead of failing silently.
+  const fail = (msg) => { log('err', msg); try { alert(msg); } catch (_) { /* no-op */ } };
+
+  if (!activeContactHash) { fail('Open a conversation first, then attach.'); return; }
   const contact = contacts.get(activeContactHash);
   if (!contact || !contact.identity) {
-    log('err', 'Cannot send an attachment — recipient public key unknown (need their announce).');
+    fail('Can’t attach: this contact’s public key isn’t known yet. Wait for their announce, or add them from a contact card.');
     return;
   }
-  if (!radioOn) { log('err', 'Connect first to send attachments.'); return; }
+  if (!radioOn) { fail('Connect to a transport first to send attachments.'); return; }
 
   let fields = new Map();
   let descriptor;
   try {
+    // Try to treat it as an image (downscale for LoRa). If decoding fails —
+    // e.g. iPhone HEIC, which createImageBitmap can't read — fall back to
+    // sending the original bytes as a generic file rather than dropping it.
+    let sentAsImage = false;
     if (file.type.startsWith('image/')) {
-      const { bytes, ext, dataUrl } = await resizeImage(file);
-      fields.set(0x06, [ext, bytes]);                    // FIELD_IMAGE = [ext, bytes]
-      descriptor = { kind: 'image', name: file.name, mime: 'image/jpeg', size: bytes.length, dataUrl };
-    } else {
+      try {
+        const { bytes, ext, dataUrl } = await resizeImage(file);
+        fields.set(0x06, [ext, bytes]);                  // FIELD_IMAGE = [ext, bytes]
+        descriptor = { kind: 'image', name: file.name, mime: 'image/jpeg', size: bytes.length, dataUrl };
+        sentAsImage = true;
+      } catch (imgErr) {
+        log('info', `  Image decode failed (${imgErr.message}); sending as a raw file`);
+      }
+    }
+    if (!sentAsImage) {
       const bytes = new Uint8Array(await file.arrayBuffer());
       const name = sanitizeFilename(file.name);
       fields.set(0x05, [[name, bytes]]);                 // FIELD_FILE_ATTACHMENTS = [[name, bytes]]
       descriptor = { kind: 'file', name, mime: file.type || 'application/octet-stream', size: bytes.length, dataUrl: await blobToDataUrl(file) };
     }
   } catch (e) {
-    log('err', `Could not read attachment: ${e.message}`);
+    fail(`Could not read attachment: ${e.message}`);
     return;
   }
 
