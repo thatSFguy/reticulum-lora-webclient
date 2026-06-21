@@ -532,6 +532,38 @@
 
 </div>
 
+<!-- Bridge-not-detected helper (shown when a local WebSocket/TCP
+     connection fails because the ws_bridge isn't running). -->
+<div id="bridge-modal" class="modal-overlay hidden">
+  <div class="modal">
+    <h2 class="modal-title">Bridge not running</h2>
+    <p class="modal-text">
+      Browsers can't open raw TCP connections, so a small local
+      <strong>WebSocket bridge</strong> has to be running to reach a Reticulum
+      daemon over TCP. Nothing answered at <code id="bridge-target"></code>.
+    </p>
+    <ol class="modal-steps">
+      <li>
+        <a id="bridge-download" class="btn-primary" href="#" rel="noopener">Download the bridge</a>
+        <span id="bridge-os-note" class="modal-hint"></span>
+      </li>
+      <li>Run the downloaded file.
+        <span class="modal-hint">On Windows, if SmartScreen warns, click “More info → Run anyway” — the binary is unsigned.</span>
+      </li>
+      <li>This window connects automatically once it's running.
+        <span id="bridge-wait" class="modal-hint">Waiting for the bridge…</span>
+      </li>
+    </ol>
+    <div class="modal-actions">
+      <a id="bridge-all" class="modal-link" href="https://github.com/thatSFguy/reticulum-lora-webclient/releases/tag/bridge-v0.5.0" target="_blank" rel="noopener">All platforms &amp; checksums</a>
+      <div class="modal-buttons">
+        <button id="bridge-retry" class="btn-secondary">Retry now</button>
+        <button id="bridge-close" class="btn-secondary">Cancel</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <!-- Import map: resolve bare specifiers to self-hosted bundles in lib/ -->
 <script type="importmap">
 {

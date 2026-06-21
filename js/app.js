@@ -2540,6 +2540,99 @@ function checkWsSecurityWarning(url) {
   } catch (_) { /* URL parse failed — let connect() fail on its own */ }
 }
 
+// ---- WebSocket bridge helper ----------------------------------------
+//
+// Browsers can't open raw TCP, so a local ws_bridge process must be
+// running to reach a Reticulum daemon over TCP. When a connection to a
+// localhost bridge fails, we surface a one-click, OS-detected download of
+// the prebuilt bridge and auto-reconnect the instant it comes up. (We
+// cannot launch the binary from the browser — no web API can — so running
+// the downloaded file is the one unavoidable manual step.)
+
+const BRIDGE = {
+  version: '0.5.0',
+  releaseUrl: 'https://github.com/thatSFguy/reticulum-lora-webclient/releases/tag/bridge-v0.5.0',
+  base: 'https://github.com/thatSFguy/reticulum-lora-webclient/releases/download/bridge-v0.5.0',
+  assets: {
+    windows: 'ws_bridge-0.5.0-windows-amd64.exe',
+    mac: 'ws_bridge-0.5.0-darwin-arm64',
+    linux: 'ws_bridge-0.5.0-linux-amd64',
+  },
+  osLabel: { windows: 'Windows (64-bit)', mac: 'macOS (Apple Silicon)', linux: 'Linux (64-bit)' },
+};
+
+let bridgePollTimer = null;
+
+function detectOS() {
+  const p = (navigator.userAgentData?.platform || navigator.platform || navigator.userAgent || '').toLowerCase();
+  if (p.includes('win')) return 'windows';
+  if (p.includes('mac') || p.includes('iphone') || p.includes('ipad')) return 'mac';
+  if (p.includes('linux') || p.includes('android')) return 'linux';
+  return null;
+}
+
+function isLocalWs(wsUrl) {
+  try {
+    const h = new URL(wsUrl).hostname.toLowerCase();
+    return h === 'localhost' || h === '127.0.0.1' || h === '::1' || h === '[::1]';
+  } catch { return false; }
+}
+
+// Resolve true if a WebSocket to baseUrl reaches the open state within
+// timeoutMs (i.e. the bridge is listening). No query params — we only
+// want a liveness check, not to make the bridge dial the rnsd.
+function probeBridge(baseUrl, timeoutMs = 1500) {
+  return new Promise((resolve) => {
+    let ws, done = false;
+    const finish = (ok) => { if (done) return; done = true; try { ws && ws.close(); } catch {} resolve(ok); };
+    try { ws = new WebSocket(baseUrl); } catch { resolve(false); return; }
+    ws.addEventListener('open', () => finish(true), { once: true });
+    ws.addEventListener('error', () => finish(false), { once: true });
+    setTimeout(() => finish(false), timeoutMs);
+  });
+}
+
+function stopBridgePoll() { if (bridgePollTimer) { clearInterval(bridgePollTimer); bridgePollTimer = null; } }
+
+function hideBridgeModal() { stopBridgePoll(); $('bridge-modal')?.classList.add('hidden'); }
+
+async function attemptBridgeReconnect(baseUrl) {
+  if (!baseUrl) return false;
+  if (await probeBridge(baseUrl)) {
+    hideBridgeModal();
+    connect('ws');
+    return true;
+  }
+  return false;
+}
+
+function showBridgeModal(baseUrl) {
+  const modal = $('bridge-modal');
+  if (!modal) return;
+  $('bridge-target').textContent = baseUrl;
+
+  const os = detectOS();
+  const dl = $('bridge-download');
+  const note = $('bridge-os-note');
+  const asset = os ? BRIDGE.assets[os] : null;
+  if (asset) {
+    dl.href = `${BRIDGE.base}/${asset}`;
+    dl.setAttribute('download', asset);
+    dl.removeAttribute('target');
+    note.textContent = `for ${BRIDGE.osLabel[os]} · v${BRIDGE.version}`;
+  } else {
+    dl.href = BRIDGE.releaseUrl;
+    dl.removeAttribute('download');
+    dl.setAttribute('target', '_blank');
+    note.textContent = 'choose your platform';
+  }
+
+  modal.classList.remove('hidden');
+  // Auto-reconnect the moment the bridge starts listening.
+  stopBridgePoll();
+  bridgePollTimer = setInterval(() => { attemptBridgeReconnect(baseUrl); }, 2500);
+}
+
 // Connect
 async function connect(transportType) {
   try {
@@ -2610,6 +2703,7 @@ async function connect(transportType) {
     };
 
     await rnode.connect();
+    hideBridgeModal();  // dismiss the helper if it was open
 
     setConnectionState(true, `Connected (${transportType.toUpperCase()})`);
     $('btn-disconnect').classList.remove('hidden');
@@ -2638,6 +2732,12 @@ async function connect(transportType) {
     }
   } catch (e) {
     log('err', 'Connect: ' + e.message);
+    // A failed connection to a local bridge almost always means the
+    // bridge isn't running — offer the one-click download + auto-retry.
+    if (transportType === 'ws') {
+      const baseUrl = ($('ws-url').value || '').trim();
+      if (baseUrl && isLocalWs(baseUrl)) showBridgeModal(baseUrl);
+    }
   } finally {
     setConnectButtonsDisabled(false);
   }
@@ -2778,6 +2878,12 @@ $('btn-clear-nodes').addEventListener('click', async () => {
   await deleteAllNodes();
   renderNodesList();
   log('info', 'Cleared all nodes');
+});
+
+// Bridge-not-running modal controls.
+$('bridge-close')?.addEventListener('click', hideBridgeModal);
+$('bridge-retry')?.addEventListener('click', () => {
+  attemptBridgeReconnect(($('ws-url').value || '').trim());
 });
 
 // NomadNet browser controls.
