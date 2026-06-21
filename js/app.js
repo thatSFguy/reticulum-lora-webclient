@@ -1635,12 +1635,6 @@ async function nnNodeContact(destHashHex) {
   return { identity, destHash, displayName: node.displayName || destHashHex.slice(0, 8), hash: destHashHex };
 }
 
-function hexToBytes(hex) {
-  const out = new Uint8Array(hex.length / 2);
-  for (let i = 0; i < out.length; i++) out[i] = parseInt(hex.substr(i * 2, 2), 16);
-  return out;
-}
-
 // Get an active link to destHashHex, reusing the current browse link when
 // it targets the same node, otherwise opening a fresh one (closing the old).
 async function nnEnsureLink(destHashHex) {
