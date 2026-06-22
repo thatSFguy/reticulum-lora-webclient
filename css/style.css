@@ -1582,13 +1582,21 @@ textarea:focus {
 
 .nn-body { flex: 1 1 auto; display: flex; min-height: 0; }
 .nn-sidebar {
-  flex: 0 0 220px;
+  flex: 0 0 auto;
+  width: 170px;
+  min-width: 120px;
+  max-width: 420px;
   display: flex;
   flex-direction: column;
   border-right: 1px solid var(--border);
   background: var(--surface);
   padding: 8px;
   min-height: 0;
+  /* Drag the right edge to widen/narrow the node list. resize needs a
+     non-visible overflow to render the grip; the inner list keeps its
+     own vertical scroll. */
+  resize: horizontal;
+  overflow: hidden;
 }
 .nn-nodes-list { overflow-y: auto; flex: 1 1 auto; min-height: 0; }
 
