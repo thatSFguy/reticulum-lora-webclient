@@ -266,7 +266,9 @@
         <div class="row">
           <button class="btn-primary js-announce-btn">Send Announce</button>
           <button id="btn-export-id" class="btn-secondary">Export Identity</button>
+          <button id="btn-import-id" class="btn-secondary">Import Identity</button>
           <button id="btn-new-id" class="btn-secondary btn-danger">New Identity</button>
+          <input id="import-id-input" type="file" accept="application/json,.json" class="hidden">
         </div>
       </div>
 
@@ -372,8 +374,10 @@
           is derived from that identity and stays the same as long as you do not
           click <em>New Identity</em>. The <em>Export Identity</em> button writes
           the private keys to a JSON file so you can move the identity to a
-          different browser or back it up. Never share that file with anyone
-          you do not trust with your messages.</p>
+          different browser or back it up; <em>Import Identity</em> loads such a
+          file back in (replacing the current identity, so export it first if
+          you want to keep it). Never share that file with anyone you do not
+          trust with your messages.</p>
 
           <h4>Announcing yourself</h4>
           <p>Clicking <em>Announce now</em> broadcasts your identity and display

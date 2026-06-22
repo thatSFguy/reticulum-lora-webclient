@@ -3775,6 +3775,69 @@ $('btn-export-id').addEventListener('click', () => {
   log('ok', 'Identity exported');
 });
 
+// Validate the shape of an exported-identity object: encPrivKey and
+// sigPrivKey are required 32-byte arrays; ratchetPrivKey is optional.
+// Returns null when valid, else a human-readable reason.
+function validateIdentityImport(obj) {
+  const is32 = (a) => Array.isArray(a) && a.length === 32 &&
+    a.every(n => Number.isInteger(n) && n >= 0 && n <= 255);
+  if (!obj || typeof obj !== 'object') return 'not a JSON object';
+  if (!is32(obj.encPrivKey)) return 'missing or invalid encPrivKey (need 32 bytes)';
+  if (!is32(obj.sigPrivKey)) return 'missing or invalid sigPrivKey (need 32 bytes)';
+  if (obj.ratchetPrivKey != null && !is32(obj.ratchetPrivKey)) return 'invalid ratchetPrivKey';
+  return null;
+}
+
+// Load an exported reticulum-identity-*.json back in. Validates, shows the
+// resulting address for confirmation (this REPLACES the current identity),
+// persists it, then reloads so every identity-derived bit of state
+// (dest hash, routing, in-memory caches) reinitialises cleanly.
+async function importIdentityFile(file) {
+  let obj;
+  try {
+    obj = JSON.parse(await file.text());
+  } catch {
+    log('err', 'Identity import failed: not valid JSON');
+    try { alert('That file is not valid JSON.'); } catch (_) { /* no-op */ }
+    return;
+  }
+  const reason = validateIdentityImport(obj);
+  if (reason) {
+    log('err', `Identity import failed: ${reason}`);
+    try { alert(`Not a valid identity file: ${reason}`); } catch (_) { /* no-op */ }
+    return;
+  }
+
+  // Derive the incoming address so the user confirms against a real value.
+  const incoming = new Identity();
+  await incoming.loadFromPrivateKeys(
+    new Uint8Array(obj.encPrivKey),
+    new Uint8Array(obj.sigPrivKey),
+    obj.ratchetPrivKey ? new Uint8Array(obj.ratchetPrivKey) : null
+  );
+  if (!incoming.ratchetPrivKey) incoming.generateRatchet();   // pre-ratchet export
+  const newDest = await computeDestinationHash('lxmf.delivery', incoming.hash);
+
+  const ok = confirm(
+    `Import identity ${toHex(newDest)}?\n\n` +
+    `This REPLACES your current identity (${toHex(myDestHash)}). ` +
+    `Export the current one first if you want to keep it.\n\n` +
+    `The app will reload after importing.`
+  );
+  if (!ok) return;
+
+  await saveIdentity(incoming.exportPrivateKeys());
+  log('ok', `Identity imported: ${toHex(newDest)} — reloading…`);
+  setTimeout(() => location.reload(), 400);
+}
+
+$('btn-import-id')?.addEventListener('click', () => $('import-id-input')?.click());
+$('import-id-input')?.addEventListener('change', (e) => {
+  const f = e.target.files && e.target.files[0];
+  if (f) importIdentityFile(f);
+  e.target.value = '';   // allow re-picking the same file
+});
+
 // Messaging
 $('btn-send').addEventListener('click', sendMessage);
 $('msg-content').addEventListener('keydown', (e) => {

@@ -1,10 +1,10 @@
 # reticulum-lora-webclient
 
-A browser-based Reticulum messaging client. Connects either directly to an [RNode](https://unsigned.io/rnode) LoRa modem over Web Bluetooth or Web Serial, or to any running Reticulum daemon (`rnsd`) over a WebSocket bridge, and exchanges encrypted LXMF messages with Sideband, NomadNet, MeshChat, and other Reticulum nodes anywhere on the network.
+A browser-based Reticulum messaging client. Connects either directly to an [RNode](https://unsigned.io/rnode) LoRa modem over Web Bluetooth or Web Serial, or to any running Reticulum daemon (`rnsd`) over a WebSocket bridge, and exchanges encrypted LXMF messages — including file and image attachments — with Sideband, NomadNet, MeshChat, and other Reticulum nodes anywhere on the network. It also browses NomadNet pages (micron markup, interactive forms, tables, file downloads).
 
 **Live app:** <https://thatsfguy.github.io/reticulum-lora-webclient/>
 
-No build step, no framework, no bundler. Plain ES modules, loaded directly in the browser. The LoRa path runs entirely in the browser with no server. The TCP-via-WebSocket path needs a small bridge process to sit between the browser and an existing `rnsd` — pick either the prebuilt Go binary (no runtime to install) or the Python script (`tools/ws_bridge.py`, 130 lines).
+No build step, no framework, no bundler. Plain ES modules, loaded directly in the browser. The LoRa path runs entirely in the browser with no server. The TCP-via-WebSocket path needs a small bridge process to sit between the browser and an existing `rnsd` — pick either the prebuilt Go binary (no runtime to install; shows a live connection-status screen) or the Python script (`tools/ws_bridge.py`).
 
 ## What it does
 
@@ -13,22 +13,23 @@ No build step, no framework, no bundler. Plain ES modules, loaded directly in th
   - **Web Serial** to an RNode (desktop fallback).
   - **WebSocket** to a local or remote `rnsd` via a small bridge script (any modern browser, including Safari and Firefox).
 - Configures the radio (frequency, bandwidth, spreading factor, coding rate, TX power) and turns it on — when talking to an RNode. When talking to `rnsd` over WebSocket there is no radio to configure; the network config lives on the daemon side.
-- Generates and persists an Ed25519 / X25519 Reticulum identity in IndexedDB.
-- Sends and receives Reticulum announces, auto-announces once at connect and every five minutes thereafter so relay identity caches stay warm.
-- Encrypts and decrypts LXMF messages for **opportunistic single-packet delivery** using the standard Reticulum ECDH + HKDF + AES-256-CBC + HMAC-SHA256 scheme.
-- Accepts incoming **Reticulum Link** handshakes and receives link-delivered LXMF messages. We act as link responder only — we validate LINKREQUESTs, emit LRPROOFs signed with our long-term Ed25519 key, receive LRRTT acknowledgements, decrypt inbound link traffic, and send per-packet PROOF receipts back so the sender does not retry forever. Sideband and MeshChat both round-trip cleanly this way.
+- Generates and persists an Ed25519 / X25519 Reticulum identity in IndexedDB. Export, import, or regenerate it from the Settings panel.
+- Sends and receives Reticulum announces, with **ratchet emission and rotation** — a fresh ratchet keypair is advertised and rotated on every announce (auto-announce fires once at connect and every five minutes thereafter, so relay identity caches stay warm).
+- Encrypts and decrypts LXMF messages using the standard Reticulum ECDH + HKDF + AES-256-CBC + HMAC-SHA256 scheme. Outbound text goes out as **opportunistic single packets**, retried until a delivery PROOF returns; the conversation view shows per-message state (sending → sent ✓ → delivered ✓✓ / failed).
+- Initiates **Reticulum Links** and transfers **Resources** — file and image attachments (with optional captions) are sent to a contact over an initiator Link as a Resource.
+- Acts as link **responder** too: validates LINKREQUESTs, emits LRPROOFs signed with our long-term Ed25519 key, handles LRRTT, decrypts inbound link traffic, and sends per-packet PROOF receipts back so senders do not retry forever. Sideband and MeshChat round-trip cleanly both ways.
+- **Browses NomadNet pages** over initiator Links + the REQUEST/RESPONSE protocol: renders micron markup (headings, colors, links, tables), interactive form fields (text, checkbox, radio) with submit, file downloads, plus a node sidebar with bookmarks and history.
+- Node aliases and contact-card exchange (paste, QR scan, or manual hash).
 - Filters the contact list by LXMF `name_hash` so announces from telemetry beacons, heartbeats, or other non-LXMF destinations do not pollute it. Contacts get an unread-count badge and a small delete button in the sidebar.
 - Stores identity, contacts, and message history locally in IndexedDB. Messages are sorted in the conversation view by their IndexedDB insertion order, which keeps the timeline correct even when a clockless LoRa sender reports a nonsense timestamp. Nothing leaves your browser except over the radio link.
 
 ## What it does not do (yet)
 
-- **Link initiation** — we are responder only. Messages we originate are always delivered opportunistically, which caps them at roughly 250–300 bytes of content.
-- **Resources** — multi-packet transfers over an established link (needed for messages larger than a single packet). So no file or image attachments.
-- **Ratchet emission on outbound announces** — we parse ratchet fields on inbound announces so the signature still validates, but we do not yet emit our own ratchet.
-- **Outbound retry queue** — a send that fails has no "pending" or "failed" state in the UI yet.
-- No propagation node / store-and-forward support. Both parties must be on the air at the same time.
-- No multi-hop transport routing tables. Single-hop LoRa only.
-- No IFAC, no LXMF stamps (we handle them on inbound, but do not emit them), no GROUP destinations.
+- **Auto-upgrade long text to a Link.** Outbound *text* is opportunistic single-packet only (≈250–300 bytes of content); a longer message is rejected with a "shorten it" notice rather than transparently sent over a Link. Attachments already use Links/Resources, so the plumbing exists — text just isn't wired to it.
+- **Propagation node / store-and-forward.** No offline delivery; both parties must be on the air at the same time.
+- **Multi-hop transport routing.** We are a leaf node, not a transport/router — no routing tables.
+- **NomadNet partials / server-side includes** (rendered as a placeholder) and **identify-on-connect** for `ALLOW_LIST` (auth-gated) pages.
+- No IFAC, no LXMF stamp *emission* (inbound stamps are handled for signature verification), no GROUP destinations.
 
 See `CLAUDE.md` for the scope rules and implementation plan, and `docs/PROTOCOL_NOTES.md` for the detailed Reticulum / LXMF interop findings accumulated while building this client.
 
@@ -66,7 +67,9 @@ For a public deploy, push to `gh-pages` (or any static bucket) and visit the HTT
 3. **Wait for announces.** When another node announces, it shows up in the contact list on the left.
 4. **Open a conversation.** Click a contact to open the conversation view, type a message, and hit Enter. Incoming messages from that contact land in the same view.
 
-Identity persists across reloads. `Export Identity` writes a JSON file containing your private keys; `New Identity` generates a fresh keypair (and will change your LXMF address).
+Identity persists across reloads. `Export Identity` writes a JSON file containing your private keys; `Import Identity` loads such a file back in (replacing the current identity, then reloading the app — export the current one first if you want to keep it); `New Identity` generates a fresh keypair (and will change your LXMF address).
+
+To browse NomadNet pages, open the **NomadNet** view, pick a discovered node (or paste a node hash), and navigate its pages — links, forms, tables, and `/file/` downloads all work over the same Reticulum Link machinery.
 
 ## TCP (WebSocket) connection
 
@@ -159,7 +162,7 @@ python tools/ws_bridge.py
 python tools/ws_bridge.py --ws-host 0.0.0.0 --ws-port 7878 --rnsd-host 10.0.0.5 --rnsd-port 4242
 ```
 
-You'll see `ws_bridge listening on ws://localhost:7878` (Go) or the equivalent two-line Python banner. That's the signal the bridge is up.
+The **Go bridge** clears the terminal and shows a live status screen — version, listen address, each connected client (browser, rnsd target, bytes up/down), total throughput, and links to the webapp/source. Run it with `-plain` to keep the old scrolling log instead (for running as a service or when output is redirected). The **Python bridge** prints a two-line banner. Either way, a running bridge is the signal you can connect.
 
 **Per-connection rnsd target — the practical difference between the two bridges:** the Go bridge accepts the rnsd `host:port` from the webapp via query parameters on every connection, so one running bridge can serve any number of webapp instances pointed at any number of different `rnsd`s without restart. The Python bridge ignores those query parameters and always uses its own `--rnsd-host`/`--rnsd-port` flags from startup; the same webapp UI works against either bridge.
 
@@ -229,18 +232,25 @@ reticulum-lora-webclient/
     rnsd-interface.js      Reticulum-direct interface over HDLC+WebSocket
                            (exposes the same shape as rnode.js so app.js doesn't branch)
     reticulum.js           Reticulum packet header encode/decode + constants
-    identity.js            Ed25519 + X25519 keypair, identity hash, destination hash
+    identity.js            Ed25519 + X25519 keypair, identity hash, destination hash, ratchet
     crypto.js              ECDH + HKDF + Token (AES-256-CBC + HMAC-SHA256)
-    announce.js            Build, parse, and validate Reticulum announces
+    announce.js            Build, parse, and validate Reticulum announces (incl. ratchet)
     link.js                Reticulum Link: responder validation, initiator handshake,
                            LRPROOF build/verify, link_id derivation, signalling encoding,
                            Token encrypt/decrypt over the derived link key
+    resource.js            Resource transfer (multi-packet): send + receive, proofs
+                           (attachments, large messages, NomadNet pages/files)
     lxmf.js                LXMF message pack/unpack + signature
-    store.js               IndexedDB for identity, contacts, messages
+    nomadnet.js            NomadNet REQUEST/RESPONSE protocol + link-target parsing
+    micron.js              Micron markup → HTML (headings, styling, links, fields, tables)
+    known-destinations.js  Well-known destination hash labels
+    store.js               IndexedDB for identity, contacts, messages, nodes, bookmarks
     app.js                 UI controller and state management
+    (transport-config.js, transport-flasher-app.js, dfu.js power the RNode flasher page)
 
-  tools/                   Python RNS-based offline verifiers + ws_bridge.py
-  tests/                   Level-2 round-trip harness against RNS reference
+  hubs.json                Curated public RNS hubs prefilled into the TCP connect field
+  tools/                   Go + Python WS bridges, Python RNS-based offline verifiers
+  test/, tests/            In-browser self-test page + round-trip harness vs RNS reference
   docs/PROTOCOL_NOTES.md   Reticulum / LXMF interop findings reference
 ```
 
@@ -250,19 +260,20 @@ Libraries (`@noble/curves` for Ed25519/X25519 and `@msgpack/msgpack` for LXMF pa
 
 The `tools/` directory contains Python scripts that validate the web client's wire output against the Python RNS reference, plus the WebSocket bridge used by the TCP connection option.
 
-- `tools/ws_bridge.py` — WebSocket↔TCP forwarder used by the "Connect (WebSocket)" option to reach a local or remote `rnsd`. Requires `pip install websockets`. See the **TCP (WebSocket) connection** section above for setup.
+- `tools/ws_bridge.go` — the WebSocket↔TCP forwarder for the "Connect (WebSocket)" option, shipped as prebuilt binaries on each `bridge-v*` release. Single CGO-free binary; shows a live status screen (`-plain` for plain logging). Per-connection rnsd target via query params, so one bridge serves many webapp instances. See the **TCP (WebSocket) connection** section above.
+- `tools/ws_bridge.py` — the same forwarder as a no-binary Python fallback. Requires `pip install websockets`; rnsd target via `--rnsd-host`/`--rnsd-port` flags.
 - `tools/identity_info.py` — dumps every derivable public piece of an exported identity (enc/sig/ratchet private and public bytes, identity hash, LXMF destination hash). Read-only, never touches network.
 - `tools/verify_lrproof.py` — runs a self-test of RNS's Ed25519, X25519, and HKDF primitives, then verifies a real LRPROOF hex string (lifted from the web client log) against `Identity.validate` to prove our link-proof signatures are byte-compatible with upstream.
 - `tools/verify_announce.py` — builds an `lxmf.delivery` announce with RNS using the web client's identity and runs it through `Identity.validate_announce`, proving our announce format is acceptable to the upstream reference.
 - `tools/rns_responder.py` — runs Python RNS as a link responder against a supplied LINKREQUEST data field, captures the LRPROOF bytes RNS would emit, and prints them field by field for a byte-for-byte diff against the web client's own output.
 
-All depend only on `rns`, `umsgpack`, and (for the bridge) `websockets` from pip.
+The Python verifiers and the Python bridge depend only on `rns`, `umsgpack`, and `websockets` from pip. The Go bridge has no runtime dependencies.
 
 ## Development notes
 
 - Open the browser DevTools console to see stack traces. The in-page log shows a terse one-line error, but the full trace only lives in the console.
 - The webapp listens for `error` and `unhandledrejection` on `window` and mirrors the message into the log, so uncaught errors from async handlers still show up.
-- `store.js` uses a single IndexedDB database named `reticulum-webclient` with object stores for `identity`, `contacts`, and `messages`. To wipe local state, open DevTools then Application then Storage then Clear site data.
+- `store.js` uses a single IndexedDB database named `reticulum-webclient` with object stores for `identity`, `contacts`, `messages`, `nodes`, `bookmarks`, and `history`. To wipe local state, open DevTools then Application then Storage then Clear site data.
 - The KISS parser accumulates bytes across BLE notifications and emits complete frames on FEND boundaries. BLE splits frames at arbitrary points, so any per-notification framing assumption will break.
 - Reticulum destination hashes are computed with the identity hexhash **outside** the name hash input, matching upstream `Destination.hash(identity, app_name, *aspects)`. The hexhash appears only in the human-readable `Destination.name`, never in on-wire hashes.
 - LRPROOF packets have a special framing exception in upstream `Packet::pack`: the 16-byte destination slot of the header carries the link_id instead of the SINGLE destination's hash, and the flag byte's destination-type bits are hardcoded to `LINK` regardless of the destination the packet was constructed with. Our `buildPacket` matches this by accepting `destType` and `destHash` as explicit parameters rather than deriving them from a destination object.
@@ -283,7 +294,7 @@ All Reticulum protocol work — identity generation, ECDH key exchange, AES-256-
 **What is NOT protected (known limitations):**
 
 - **Private keys at rest** are stored unencrypted in the browser's IndexedDB. Anyone with access to your browser profile — browser extensions with matching host permissions, device backup tools, physical access to an unlocked device, or root access on Android — can extract them. The Export Identity file is likewise unencrypted JSON containing the complete signing and encryption private keys. Treat it like a password.
-- **No forward secrecy.** The ratchet key is generated once at identity creation and is never rotated. If an attacker obtains your private key, they can decrypt previously captured messages. Full ratchet rotation is deferred to a future release.
+- **Forward secrecy is partial.** The ratchet keypair now rotates on every announce (~5 min) and the new public key is advertised; retired ratchet private keys are not persisted, so traffic a peer encrypted to an expired ratchet can't be recovered from the stored identity. Caveats: peers that don't yet know a ratchet fall back to your long-term X25519 key (no FS for that traffic), and the current ratchet plus long-term key still live unencrypted in IndexedDB — anyone who extracts those can read messages encrypted to them.
 - **BLE transport is cleartext at L2.** Web Bluetooth does not request BLE bonding, so the NUS link between your device and the RNode modem is not encrypted at the Bluetooth radio layer. An observer within Bluetooth range (~10 m) can see the encrypted Reticulum packets and their headers (destination hashes, packet types, sizes, timing) but cannot decrypt message content.
 - **WebSocket `ws://` to remote hosts exposes packet headers.** When using the WebSocket transport to a non-localhost destination over `ws://` (not `wss://`), Reticulum packet headers are visible to network observers on the path. Message content remains end-to-end encrypted, but destination hashes, packet types, and timing metadata leak. The app shows a visible warning banner when a non-localhost `ws://` connection is active. Use `wss://` for remote connections if your bridge supports TLS.
 - **Metadata.** Reticulum packet headers contain 16-byte destination hashes in cleartext by design. Any observer on the radio channel or transport path can correlate who is communicating with whom by watching destination hashes, even though they cannot read message content. Periodic announces broadcast your full 64-byte public key, display name, and destination hash to the mesh every five minutes. This is inherent to the Reticulum protocol, not specific to this client.
