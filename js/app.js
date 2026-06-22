@@ -3370,13 +3370,13 @@ function checkWsSecurityWarning(url) {
 // the downloaded file is the one unavoidable manual step.)
 
 const BRIDGE = {
-  version: '0.5.0',
-  releaseUrl: 'https://github.com/thatSFguy/reticulum-lora-webclient/releases/tag/bridge-v0.5.0',
-  base: 'https://github.com/thatSFguy/reticulum-lora-webclient/releases/download/bridge-v0.5.0',
+  version: '0.6.0',
+  releaseUrl: 'https://github.com/thatSFguy/reticulum-lora-webclient/releases/tag/bridge-v0.6.0',
+  base: 'https://github.com/thatSFguy/reticulum-lora-webclient/releases/download/bridge-v0.6.0',
   assets: {
-    windows: 'ws_bridge-0.5.0-windows-amd64.exe',
-    mac: 'ws_bridge-0.5.0-darwin-arm64',
-    linux: 'ws_bridge-0.5.0-linux-amd64',
+    windows: 'ws_bridge-0.6.0-windows-amd64.exe',
+    mac: 'ws_bridge-0.6.0-darwin-arm64',
+    linux: 'ws_bridge-0.6.0-linux-amd64',
   },
   osLabel: { windows: 'Windows (64-bit)', mac: 'macOS (Apple Silicon)', linux: 'Linux (64-bit)' },
 };
