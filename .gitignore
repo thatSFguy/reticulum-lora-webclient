@@ -16,3 +16,6 @@ venv/
 
 # Node
 node_modules/
+
+# Go — go.sum is regenerated in CI (go mod tidy), not committed
+tools/go.sum
