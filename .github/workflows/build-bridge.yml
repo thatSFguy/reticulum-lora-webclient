@@ -19,9 +19,9 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Version tag to build (bridge-v0.5.0)'
+        description: 'Version tag to build (bridge-v0.6.0)'
         required: true
-        default: 'bridge-v0.5.0'
+        default: 'bridge-v0.6.0'
 
 permissions:
   contents: write
