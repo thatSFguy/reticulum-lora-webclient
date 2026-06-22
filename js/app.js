@@ -1834,9 +1834,10 @@ async function handleNomadNetResponse(link, requestId, response) {
   await addHistory({ url: `${nnState.destHashHex}:${pending.path}`, title: pending.path, visited: Date.now() }).catch(() => {});
 }
 
-// Send a NomadNet page request over an active link.
-async function nnSendRequest(link, path) {
-  const body = await buildRequest(path, null);
+// Send a NomadNet page request over an active link. `data` is null for a
+// plain GET or a {field_/var_ → value} dict for a form submit (§11.6.2).
+async function nnSendRequest(link, path, data = null) {
+  const body = await buildRequest(path, data);
   const enc = await link.encrypt(body);
   const packet = buildPacket({
     headerType: HEADER_1, destType: DEST_LINK, packetType: PACKET_DATA,
@@ -1849,8 +1850,10 @@ async function nnSendRequest(link, path) {
   await rnode.sendPacket(packet);
 }
 
-// Navigate to a node/path: ensure link, send request. `push` records history.
-async function nnNavigate(destHashHex, path, { push = true } = {}) {
+// Navigate to a node/path: ensure link, send request. `push` records
+// history; `data` carries form fields for a submit (not replayed by
+// back/forward, which re-GET).
+async function nnNavigate(destHashHex, path, { push = true, data = null } = {}) {
   if (!radioOn) { nnSetStatus('radio is off', 'err'); return; }
   path = path || NN_DEFAULT_PATH;
   try {
@@ -1862,7 +1865,7 @@ async function nnNavigate(destHashHex, path, { push = true } = {}) {
       nnHistory.push({ destHashHex, path });
       nnHistoryIdx = nnHistory.length - 1;
     }
-    await nnSendRequest(link, path);
+    await nnSendRequest(link, path, data);
   } catch (e) {
     nnSetStatus(e.message, 'err');
   }
@@ -1881,17 +1884,51 @@ function nnRenderPage(rawText, destHashHex, path) {
   pageEl.innerHTML = renderMicron(body);
   if (headers.bg) pageEl.style.background = headers.bg.startsWith('#') ? headers.bg : `#${headers.bg}`;
   else pageEl.style.background = '';
-  // Wire micron links.
+  // Wire micron links. A link with a fields component submits the named
+  // page widgets (and any inline var params) as the request data dict.
   pageEl.querySelectorAll('a.mu-link').forEach((a) => {
     a.addEventListener('click', (ev) => {
       ev.preventDefault();
       const tgt = parseLinkTarget(a.dataset.target);
-      if (tgt.kind === 'page') nnNavigate(destHashHex, tgt.path);
-      else if (tgt.kind === 'node') nnNavigate(tgt.hash, tgt.path);
+      const data = a.dataset.fields != null ? nnCollectFields(pageEl, a.dataset.fields) : null;
+      if (tgt.kind === 'page') nnNavigate(destHashHex, tgt.path, { data });
+      else if (tgt.kind === 'node') nnNavigate(tgt.hash, tgt.path, { data });
       else if (tgt.kind === 'lxmf') nnSetStatus(`link opens an LXMF conversation with ${tgt.hash.slice(0,12)}… (open it from Messages)`, 'info');
       else nnSetStatus('unsupported link target', 'err');
     });
   });
+}
+
+// Build the request data dict for a form-submitting link. `fieldsSpec` is
+// the link's third backtick component (§11.6.2/§11.6.3): pipe-separated
+// entries where `key=value` becomes var_key, a bare name selects a widget
+// to collect as field_name, and `*` collects every widget. Unchecked
+// checkboxes are omitted; multiple checked boxes sharing a name are
+// comma-joined. Mirrors nomadnet Browser.py field collection.
+function nnCollectFields(pageEl, fieldsSpec) {
+  const data = {};
+  const entries = (fieldsSpec || '').split('|').filter(s => s.length);
+  const allFields = entries.includes('*');
+  const wanted = new Set();
+  for (const e of entries) {
+    if (e === '*') continue;
+    const eq = e.indexOf('=');
+    if (eq >= 0) data['var_' + e.slice(0, eq)] = e.slice(eq + 1);
+    else wanted.add(e);
+  }
+  pageEl.querySelectorAll('.mu-field-input').forEach((el) => {
+    const name = el.dataset.fieldName;
+    if (!name || (!allFields && !wanted.has(name))) return;
+    const key = 'field_' + name;
+    if (el.type === 'checkbox' || el.type === 'radio') {
+      if (!el.checked) return;                       // omit unchecked entirely
+      const v = el.dataset.fieldValue || '';
+      data[key] = data[key] ? `${data[key]},${v}` : v;
+    } else {
+      data[key] = el.value;
+    }
+  });
+  return data;
 }
 
 function nnUpdateNavButtons() {
@@ -3541,6 +3578,25 @@ function markInterfaceReady() {
 document.querySelectorAll('.js-connect-btn').forEach(b => {
   b.addEventListener('click', () => connect(b.dataset.transport));
 });
+
+// Restore the NomadNet node-list width the user last dragged to, and
+// persist any new drag. CSS resize sets an inline width; a ResizeObserver
+// catches the end of the drag. Skip a zero width (sidebar hidden on
+// mobile) so a phone session can't clobber the saved desktop width.
+(function initNnSidebarResize() {
+  const sb = document.querySelector('.nn-sidebar');
+  if (!sb || typeof ResizeObserver === 'undefined') return;
+  const saved = parseInt(localStorage.getItem('nn-sidebar-width') || '', 10);
+  if (saved > 0) sb.style.width = `${saved}px`;
+  let t = null;
+  new ResizeObserver(() => {
+    if (t) clearTimeout(t);
+    t = setTimeout(() => {
+      const w = Math.round(sb.getBoundingClientRect().width);
+      if (w > 0) localStorage.setItem('nn-sidebar-width', String(w));
+    }, 250);
+  }).observe(sb);
+})();
 
 $('btn-disconnect').addEventListener('click', async () => {
   if (announceTimer) { clearInterval(announceTimer); announceTimer = null; }

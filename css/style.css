@@ -1668,6 +1668,29 @@ textarea:focus {
 .mu-link { color: var(--accent-text); text-decoration: underline; cursor: pointer; }
 .mu-link:hover { color: var(--accent-hi); }
 
+/* NomadNet micron input-field widgets. */
+.mu-field-text {
+  display: inline-block;
+  padding: 2px 6px;
+  margin: 1px 2px;
+  border: 1px solid var(--border-strong);
+  border-radius: 4px;
+  background: var(--surface-2);
+  color: var(--text);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 13px;
+  vertical-align: baseline;
+}
+.mu-field-text:focus { outline: none; border-color: var(--accent); }
+.mu-checkbox, .mu-radio {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin: 1px 6px 1px 2px;
+  cursor: pointer;
+}
+.mu-checkbox input, .mu-radio input { cursor: pointer; margin: 0; accent-color: var(--accent); }
+
 @media (max-width: 720px) {
   .nn-sidebar { display: none; }
 }

@@ -51,6 +51,38 @@ function openSpan(st) {
   return s + '>';
 }
 
+// Render one micron input-field widget to an HTML control. `content` is
+// the text between '<' and the first backtick ([flags|]name); `data` is
+// the text between that backtick and '>' (initial value, or label for a
+// checkbox/radio). Mirrors nomadnet MicronParser field parsing so the
+// emitted control carries the field name app.js needs at submit time.
+function renderField(content, data) {
+  let flags = '', name = content, value = '', prechecked = false;
+  if (content.includes('|')) {
+    const c = content.split('|');
+    flags = c[0];
+    name = c[1] || '';
+    if (c.length > 2) value = c[2];
+    if (c.length > 3 && c[3] === '*') prechecked = true;
+  }
+  let type = 'field', masked = false, width = 24;
+  if (flags.includes('^')) { type = 'radio'; flags = flags.replace(/\^/g, ''); }
+  else if (flags.includes('?')) { type = 'checkbox'; flags = flags.replace(/\?/g, ''); }
+  else if (flags.includes('!')) { masked = true; flags = flags.replace(/!/g, ''); }
+  if (flags.length) { const w = parseInt(flags, 10); if (!isNaN(w)) width = Math.min(w, 256); }
+
+  const nameEsc = escapeHtml(name);
+  if (type === 'checkbox' || type === 'radio') {
+    const val = value || data;   // value falls back to the label text
+    const group = type === 'radio' ? ` name="mu-radio-${nameEsc}"` : '';
+    return `<label class="mu-${type}"><input type="${type}" class="mu-field-input"` +
+           ` data-field-name="${nameEsc}" data-field-value="${escapeHtml(val)}"${group}` +
+           `${prechecked ? ' checked' : ''}><span>${escapeHtml(data)}</span></label>`;
+  }
+  return `<input class="mu-field-input mu-field-text" type="${masked ? 'password' : 'text'}"` +
+         ` data-field-name="${nameEsc}" value="${escapeHtml(data)}" size="${width}">`;
+}
+
 // Render a single content line's inline markup. Returns { html, align }.
 function renderInline(line) {
   const st = freshState();
@@ -90,6 +122,23 @@ function renderInline(line) {
                (fields ? ` data-fields="${escapeHtml(fields)}"` : '') +
                `>${escapeHtml(label)}</a>`;
         i = end + 1;
+        continue;
+      }
+      buf += ch; i++; continue;
+    }
+
+    if (ch === '<') {
+      // Input field widget: <[flags|]name`value> (NomadNet MicronParser).
+      // Requires a backtick before the closing '>' — otherwise it is a
+      // literal '<'. flags may carry ^ (radio), ? (checkbox), ! (masked)
+      // and a numeric width; value is the initial text (field) or label
+      // (checkbox/radio). See SPEC §11.6.2.
+      const fb = line.indexOf('`', i + 1);
+      const fe = line.indexOf('>', i + 1);
+      if (fb > i && fe > fb) {
+        flush();
+        out += renderField(line.slice(i + 1, fb), line.slice(fb + 1, fe));
+        i = fe + 1;
         continue;
       }
       buf += ch; i++; continue;
