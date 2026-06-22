@@ -84,6 +84,19 @@ export async function unpackMessage(data, destHash) {
   const hashedOriginal = concatBytes([destHash, sourceHash, msgpackData]);
   const hashOriginal   = await sha256(hashedOriginal);
 
+  // Canonical LXMF message_id (SPEC §5.5 / §5.7.1): the value reactions
+  // (§5.9.8) and replies (§5.9.9) reference. Distinct from the §5.6
+  // signature hashes above — it is computed over a path-dependent
+  // msgpack_payload:
+  //   - un-stamped (4-element array): the payload bytes EXACTLY AS
+  //     RECEIVED (msgpackData). Re-encoding would diverge from every
+  //     spec-compliant peer the moment the sender's msgpack encoder
+  //     drifts from ours (non-minimal ints, str-vs-bin, float width).
+  //   - stamped (5-element array): element [4] dropped, first four
+  //     re-packed canonically (== strippedMsgpack here).
+  const msgpackForId = payload.length === 4 ? msgpackData : strippedMsgpack;
+  const messageId    = await sha256(concatBytes([destHash, sourceHash, msgpackForId]));
+
   return {
     sourceHash,
     signature,
@@ -105,6 +118,8 @@ export async function unpackMessage(data, destHash) {
     // Fallback view for the "no stamp stripping" variant.
     hashedPartOriginal: hashedOriginal,
     messageHashOriginal: hashOriginal,
+    // Canonical LXMF message_id (raw 32 bytes) — reaction/reply target id.
+    messageId,
     payloadElementCount: payload.length,
   };
 }
@@ -221,7 +236,13 @@ export async function packMessage(sourceIdentity, destHash, sourceHash, title, c
 
   // On-wire format (destination stripped for opportunistic single-packet):
   //   source_hash(16) + signature(64) + msgpack(payload)
-  return concatBytes([sourceHash, signature, msgpackData]);
+  // messageHash is the canonical LXMF message_id (SPEC §5.5) for this
+  // 4-element (un-stamped) message — returned so the sender can store it
+  // and later match inbound reactions/replies that target it (§5.9.8/9).
+  return {
+    payload: concatBytes([sourceHash, signature, msgpackData]),
+    messageId: messageHash,
+  };
 }
 
 // ---- Helpers ---------------------------------------------------------

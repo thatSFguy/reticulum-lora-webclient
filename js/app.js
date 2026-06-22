@@ -1146,6 +1146,16 @@ async function dispatchIncomingMessage(msg, rxInfo) {
 
   log('info', `  LXMF payload: elements=${msg.payloadElementCount} raw_msgpack=${msg.msgpackData.length}B stripped=${msg.msgpackForHash.length}B destHashInBody=${toHex(msg.destHash).substring(0, 16)}...`);
 
+  // Tap-back reaction (FIELD_REACTION 0x40, SPEC §5.9.8). A reaction is a
+  // standalone empty-body LXMF — it MUST be aggregated onto its target
+  // message, not rendered as its own (empty) bubble. Handle it before the
+  // content dedupe (reactions carry empty content and would collide).
+  const reaction = parseReaction(msg.fields);
+  if (reaction) {
+    await handleIncomingReaction(reaction, sourceHashHex);
+    return;
+  }
+
   // Session-level dedupe. On a duplicate, increment the count on
   // the already-saved row and re-render so the user sees "×2", "×3",
   // etc. but no new bubble appears.
@@ -1223,6 +1233,7 @@ async function dispatchIncomingMessage(msg, rxInfo) {
     direction: 'incoming',
     content: msg.content,
     title: msg.title,
+    messageId: msg.messageId ? toHex(msg.messageId) : undefined,  // for matching inbound reactions
     timestamp: senderTs != null ? senderTs : Date.now(),
     senderTimeMissing: senderTs == null,
     rssi: rxInfo.rssi,
@@ -2097,7 +2108,7 @@ async function sendMessage() {
     await renderMessages(activeContactHash);
     log('info', `Sending ${descriptor.kind} "${descriptor.name}"${content ? ' + caption' : ''} to "${contact.displayName}"…`);
     try {
-      const delivered = await sendLxmfOverLink(contact, content, '', fields);
+      const delivered = await sendLxmfOverLink(contact, content, '', fields, id);
       await updateMessage(id, { state: delivered ? MSG_STATE_DELIVERED : MSG_STATE_SENT });
     } catch (e) {
       await updateMessage(id, { state: MSG_STATE_FAILED, lastError: e.message });
@@ -2134,7 +2145,7 @@ async function sendMessage() {
     // Pack LXMF message. LXMF's source_hash field is the sender's
     // LXMF delivery *destination* hash, not the identity hash —
     // receivers key their contact table on destination hashes.
-    const lxmfPayload = await packMessage(
+    const { payload: lxmfPayload, messageId: outMessageId } = await packMessage(
       myIdentity, contact.destHash, myDestHash,
       '', content, {}
     );
@@ -2217,7 +2228,7 @@ async function sendMessage() {
       await renderMessages(activeContactHash);
       log('info', `Message too large for one packet (${packet.length}B) — sending over a Link…`);
       try {
-        const delivered = await sendLxmfOverLink(contact, content, '', new Map());
+        const delivered = await sendLxmfOverLink(contact, content, '', new Map(), id);
         await updateMessage(id, { state: delivered ? MSG_STATE_DELIVERED : MSG_STATE_SENT });
       } catch (e) {
         await updateMessage(id, { state: MSG_STATE_FAILED, lastError: e.message });
@@ -2245,6 +2256,7 @@ async function sendMessage() {
       state: radioOn ? MSG_STATE_SENDING : MSG_STATE_PENDING,
       packetHash: packetHashHex,
       rawPacket: Array.from(packet),
+      messageId: toHex(outMessageId),  // canonical id, for matching inbound reactions
       attempts: 0,
       nextRetryAt: 0,
     };
@@ -2275,6 +2287,61 @@ async function sendMessage() {
 function getField(fields, key) {
   if (!fields) return undefined;
   return fields instanceof Map ? fields.get(key) : (fields[key] ?? fields[String(key)]);
+}
+
+// Parse a FIELD_REACTION (0x40) tap-back, SPEC §5.9.8. The field value is
+// an int-keyed dict {0x00: <raw 32-byte target message_id>, 0x01: <UTF-8
+// emoji>}. The reaction carries NO reactor identity on the wire —
+// attribution is the carrying LXMF's own source (resolved at the call
+// site). Tolerates bytes/str carriers and Map/object inner maps. Returns
+// {reactionToHex, emoji} or null if this isn't a (well-formed) reaction.
+function parseReaction(fields) {
+  const reactionMap = getField(fields, 0x40);
+  if (reactionMap == null || typeof reactionMap !== 'object') return null;
+  const reactionToHex = reactionHashHex(getField(reactionMap, 0x00));  // REACTION_TO
+  const emoji         = reactionString(getField(reactionMap, 0x01));   // REACTION_CONTENT
+  if (!reactionToHex || !emoji) return null;
+  return { reactionToHex, emoji };
+}
+
+// A raw 32-byte message_id as hex; also tolerate an already-hex string in
+// case an encoder shipped it hex-encoded (SPEC §5.9.8 bytes/str tolerance).
+function reactionHashHex(v) {
+  if (v instanceof Uint8Array) return v.length ? toHex(v) : null;
+  if (typeof v === 'string' && v.length) return v.toLowerCase();
+  return null;
+}
+
+// Reaction content as a string — msgpack may surface it as str or bin.
+function reactionString(v) {
+  if (typeof v === 'string') return v || null;
+  if (v instanceof Uint8Array) {
+    try { return new TextDecoder().decode(v) || null; } catch (_) { return null; }
+  }
+  return null;
+}
+
+// Aggregate an inbound reaction onto its target message, dedup by
+// (reactor, emoji), and re-render. SPEC §5.9.8: receivers MUST aggregate
+// and MUST NOT render the reaction-carrying LXMF as a separate bubble.
+// reactorHex is the carrying LXMF's source (its lxmf.delivery dest hash).
+async function handleIncomingReaction(reaction, reactorHex) {
+  const all = await getAllMessages();
+  const target = all.find(m => m.messageId === reaction.reactionToHex);
+  if (!target) {
+    log('info', `  Reaction "${reaction.emoji}" from ${reactorHex.substring(0, 12)}... targets unknown message ${reaction.reactionToHex.substring(0, 16)}... — ignored`);
+    return;
+  }
+  const reactions = target.reactions || {};
+  const senders = reactions[reaction.emoji] || [];
+  if (senders.includes(reactorHex)) {
+    log('info', `  Duplicate reaction "${reaction.emoji}" from ${reactorHex.substring(0, 12)}... — ignored`);
+    return;
+  }
+  reactions[reaction.emoji] = [...senders, reactorHex];
+  await updateMessage(target.id, { reactions });
+  log('ok', `  Reaction "${reaction.emoji}" from ${reactorHex.substring(0, 12)}... on message #${target.id}`);
+  if (activeContactHash === target.contactHash) await renderMessages(activeContactHash);
 }
 
 function blobToDataUrl(blob) {
@@ -2311,10 +2378,16 @@ async function resizeImage(file, maxDim = 512, quality = 0.5) {
 // Send a packed LXMF (with optional attachment fields) to a contact over a
 // Link. Returns true if confirmed delivered (Resource proof), false if sent
 // as a single packet (delivery proof, if any, arrives async). Throws on error.
-async function sendLxmfOverLink(contact, content, title, fields) {
+async function sendLxmfOverLink(contact, content, title, fields, rowId = null) {
   if (!radioOn) throw new Error('Radio is off');
   const link = await openLinkToContact(contact);
-  const packed = await packMessage(myIdentity, contact.destHash, myDestHash, title || '', content || '', fields || new Map());
+  const { payload: packed, messageId } = await packMessage(myIdentity, contact.destHash, myDestHash, title || '', content || '', fields || new Map());
+  // Persist the canonical message_id so an inbound reaction/reply that
+  // targets this message can be matched back to the row (§5.9.8/9).
+  if (rowId != null) {
+    try { await updateMessage(rowId, { messageId: toHex(messageId) }); }
+    catch (_) { /* id is best-effort; never block the send on it */ }
+  }
   const destBytes = contact.destHash instanceof Uint8Array ? contact.destHash : new Uint8Array(contact.destHash);
   const container = concatBytes([destBytes, packed]);  // link form keeps the dest hash
   const encrypted = await link.encrypt(container);
@@ -3140,8 +3213,9 @@ async function renderMessages(contactHash) {
     const time = ts != null ? formatMessageTime(ts) : '(no time)';
     const stateIcon = renderOutgoingStateIcon(msg);
     const rxMeta = renderIncomingRxMeta(msg);
-    const body = msg.content ? `<div>${escapeHtml(msg.content)}</div>` : '';
-    div.innerHTML = `${renderAttachment(msg.attachment)}${body}<div class="meta">${time}${stateIcon}${rxMeta}</div>`;
+    const body = msg.content ? `<div class="message-text">${escapeHtml(msg.content)}</div>` : '';
+    const reactions = renderReactions(msg.reactions);
+    div.innerHTML = `${renderAttachment(msg.attachment)}${body}${reactions}<div class="meta">${time}${stateIcon}${rxMeta}</div>`;
     list.appendChild(div);
   }
   list.scrollTop = list.scrollHeight;
@@ -3160,6 +3234,20 @@ function renderAttachment(att) {
     return `<audio class="att-audio" controls src="${att.dataUrl}"></audio>`;
   }
   return `<a class="att-file" href="${att.dataUrl}" download="${escapeHtml(att.name)}">📎 ${escapeHtml(att.name)}${kb}</a>`;
+}
+
+// Render aggregated tap-back reactions (SPEC §5.9.8) as small `👍 2` chips
+// below the bubble. `reactions` is {emoji: [reactorHash, ...]}; an empty or
+// missing map renders nothing.
+function renderReactions(reactions) {
+  if (!reactions) return '';
+  const entries = Object.entries(reactions).filter(([, s]) => s && s.length);
+  if (!entries.length) return '';
+  const chips = entries.map(([emoji, senders]) => {
+    const count = senders.length > 1 ? ` ${senders.length}` : '';
+    return `<span class="reaction-chip">${escapeHtml(emoji)}${count}</span>`;
+  }).join('');
+  return `<div class="reactions">${chips}</div>`;
 }
 
 // Radio metadata for incoming messages: hops, RSSI, SNR, and dupe count.

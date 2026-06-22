@@ -726,6 +726,11 @@ a { color: var(--accent); }
   line-height: 1.5;
   word-wrap: break-word;
 }
+/* Preserve sender-authored line breaks; still wrap long words. */
+.message-text {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
 .message.incoming {
   background: var(--bubble-in-bg);
   color: var(--bubble-in-text);
@@ -770,6 +775,31 @@ a { color: var(--accent); }
   margin-left: 4px;
 }
 .message.incoming .rx-meta { color: var(--text-muted); }
+
+/* Tap-back reactions (SPEC §5.9.8) — small chips under the bubble. */
+.reactions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 5px;
+}
+.reaction-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 12px;
+  line-height: 1;
+  padding: 3px 7px;
+  border-radius: 11px;
+  background: var(--bg);
+  border: 0.5px solid var(--border);
+  color: var(--text);
+}
+.message.outgoing .reaction-chip {
+  background: rgba(0, 0, 0, 0.18);
+  border-color: rgba(255, 255, 255, 0.25);
+  color: rgba(255, 255, 255, 0.95);
+}
 
 /* Compose */
 

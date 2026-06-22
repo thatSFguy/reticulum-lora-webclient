@@ -93,7 +93,7 @@ async function main() {
 
   // ---- Scenario B: Alice sends an opportunistic LXMF message to Bob --------
   const content = "hello from tests/roundtrip.mjs";
-  const lxmfPayload = await packMessage(
+  const { payload: lxmfPayload } = await packMessage(
     alice,
     bobDestHash,
     aliceDestHash,
