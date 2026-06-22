@@ -1583,9 +1583,9 @@ textarea:focus {
 .nn-body { flex: 1 1 auto; display: flex; min-height: 0; }
 .nn-sidebar {
   flex: 0 0 auto;
-  width: 170px;
+  width: 340px;
   min-width: 120px;
-  max-width: 420px;
+  max-width: 560px;
   display: flex;
   flex-direction: column;
   border-right: 1px solid var(--border);
@@ -1627,7 +1627,7 @@ textarea:focus {
 }
 .nn-side-row:hover { background: var(--surface-hover); }
 .nn-side-name { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.nn-side-hash { color: var(--text-muted); font-family: ui-monospace, monospace; font-size: 11px; }
+.nn-side-hash { color: var(--text-muted); font-family: ui-monospace, monospace; font-size: 11px; max-width: 45%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 0 1 auto; }
 .nn-side-del { border: none; background: none; color: var(--text-muted); cursor: pointer; }
 
 .nn-main { flex: 1 1 auto; display: flex; flex-direction: column; min-width: 0; }

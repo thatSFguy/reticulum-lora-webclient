@@ -1934,7 +1934,16 @@ async function renderNomadNetSidebar() {
   let html = '<div class="nn-side-title">Bookmarks</div>';
   if (bookmarks.length === 0) html += '<div class="nn-side-empty">none</div>';
   for (const b of bookmarks) {
-    html += `<div class="nn-side-row" data-url="${b.url}"><span class="nn-side-name">${escapeHtml(b.title || b.url)}</span><button class="nn-side-del" data-del-bm="${b.url}">✕</button></div>`;
+    // The stored title is just the raw "hash:path" url, so derive a
+    // friendly label from the known-nodes list instead: node display
+    // name as the primary line, the page path (when not the default
+    // index) as the dim secondary. Falls back to the short hash when
+    // the node hasn't been seen / announced.
+    const [bmHash, bmPath] = b.url.split(/:(.+)/);
+    const node = nodes.find(n => n.hash === bmHash);
+    const name = node?.displayName || (bmHash ? bmHash.slice(0, 8) : b.url);
+    const sub = bmPath && bmPath !== NN_DEFAULT_PATH ? bmPath : (bmHash ? bmHash.slice(0, 8) : '');
+    html += `<div class="nn-side-row" data-url="${b.url}"><span class="nn-side-name">${escapeHtml(name)}</span><span class="nn-side-hash">${escapeHtml(sub)}</span><button class="nn-side-del" data-del-bm="${b.url}">✕</button></div>`;
   }
   html += '<div class="nn-side-title">Nodes</div>';
   if (nodes.length === 0) html += '<div class="nn-side-empty">no NomadNet nodes seen yet</div>';
