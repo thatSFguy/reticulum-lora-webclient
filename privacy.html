@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Privacy Statement — Reticulum LoRa Web Client</title>
+  <meta name="description" content="Privacy statement for the Reticulum LoRa web client and the ws_bridge tool. No personal data is collected.">
+  <style>
+    :root { color-scheme: dark; }
+    body {
+      margin: 0; padding: 2rem 1rem;
+      background: #0e1116; color: #d6dae0;
+      font: 16px/1.6 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+    }
+    main { max-width: 760px; margin: 0 auto; }
+    h1 { font-size: 1.6rem; margin: 0 0 .25rem; color: #fff; }
+    h2 { font-size: 1.15rem; margin: 2rem 0 .5rem; color: #fff; }
+    a { color: #6fb3ff; }
+    code { background: #1b2230; padding: .1em .35em; border-radius: 4px; font-size: .9em; }
+    .muted { color: #8b95a3; font-size: .9rem; }
+    ul { padding-left: 1.25rem; }
+    li { margin: .3rem 0; }
+    .lead { background: #131a24; border: 1px solid #243044; border-radius: 8px; padding: 1rem 1.25rem; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>Privacy Statement</h1>
+  <p class="muted">Reticulum LoRa Web Client and the <code>ws_bridge</code> tool · last updated 2026-06-22</p>
+
+  <p class="lead"><strong>We do not collect any personal information.</strong> This is a static,
+  serverless web application. There are no accounts, no analytics, no cookies, no tracking, and no
+  server operated by us that receives, stores, or processes your data.</p>
+
+  <h2>Data stays on your device</h2>
+  <p>Everything the app creates or uses is stored locally in your browser's IndexedDB and never
+  transmitted to us:</p>
+  <ul>
+    <li>Your Reticulum identity and private keys</li>
+    <li>Contacts, messages, and conversation history</li>
+    <li>Discovered nodes, bookmarks, and browsing history</li>
+    <li>Settings (e.g. the chosen connection target)</li>
+  </ul>
+  <p>You can export or delete this data at any time from within the app or via your browser's
+  "clear site data" controls.</p>
+
+  <h2>Messages</h2>
+  <p>Messages are end-to-end encrypted in your browser and travel only over the Reticulum network you
+  choose to connect to (a local LoRa radio, or a Reticulum daemon you point the app at). We operate no
+  server that can see or store your messages.</p>
+
+  <h2>Hosting</h2>
+  <p>The site is served as static files from GitHub Pages. Like any web host, GitHub may log standard
+  request metadata (such as IP address and browser user-agent) when serving files; this is handled by
+  GitHub under its own policies and is not accessible to us. We add no analytics or other collection on
+  top of it. JavaScript libraries are bundled and served from this same site — no third-party CDN is
+  used.</p>
+
+  <h2>Third-party requests (only for specific features)</h2>
+  <ul>
+    <li><strong>Map tiles</strong> — the Nodes map view loads tiles from OpenStreetMap
+    (<code>tile.openstreetmap.org</code>), which receives your IP address and the map area you view.
+    Open under OpenStreetMap's policy. If you never open the map, no tile requests are made.</li>
+    <li><strong>Firmware version check</strong> — the optional RNode firmware flasher page queries the
+    public GitHub API (<code>api.github.com</code>) for the latest firmware release. No identifiers
+    beyond a standard web request are sent.</li>
+    <li><strong>Bridge download</strong> — downloading the <code>ws_bridge</code> binary is a normal
+    file download from this site (GitHub Pages).</li>
+  </ul>
+
+  <h2>The ws_bridge tool</h2>
+  <p>The optional <code>ws_bridge</code> program runs locally on your own machine. It forwards bytes
+  between your browser and the Reticulum daemon you choose, and copies them without inspecting or
+  modifying message content. It collects nothing, stores nothing, and sends nothing of its own to any
+  third party.</p>
+
+  <h2>Cookies</h2>
+  <p>None are set.</p>
+
+  <h2>Contact</h2>
+  <p>Source code and issue tracker:
+  <a href="https://github.com/thatSFguy/reticulum-lora-webclient" target="_blank" rel="noopener">github.com/thatSFguy/reticulum-lora-webclient</a>.</p>
+
+  <p class="muted"><a href="./">← Back to the app</a></p>
+</main>
+</body>
+</html>
