@@ -191,8 +191,34 @@ function encodeIntKey(k) {
   throw new Error(`LXMF field key out of range: ${k}`);
 }
 
+// Encode one LXMF field value. A Map value is hand-encoded as an msgpack
+// map with INTEGER keys; everything else (arrays, bytes, strings, numbers)
+// round-trips fine through the bundled encoder. The Map special-case
+// matters because @msgpack/msgpack (this build) encodes a Map as an empty
+// map (0x80) and a plain object's integer keys as STRINGS — neither is the
+// int-keyed form LXMF requires for nested dict fields such as the reaction
+// payload fields[0x40] = {0x00: target_id, 0x01: emoji} (SPEC §5.9.8).
+function encodeFieldValue(v) {
+  if (v instanceof Map) return encodeIntKeyedMap(v);
+  return new Uint8Array(msgpackEncode(v));
+}
+
+// Hand-encode a Map as an msgpack map with integer keys (recursing into
+// nested Map values via encodeFieldValue).
+function encodeIntKeyedMap(map) {
+  const entries = [...map.entries()];
+  if (entries.length === 0) return new Uint8Array([0x80]);     // empty fixmap
+  if (entries.length > 15) throw new Error('too many map entries');
+  const parts = [new Uint8Array([0x80 | entries.length])];     // fixmap header
+  for (const [k, v] of entries) {
+    parts.push(encodeIntKey(k));
+    parts.push(encodeFieldValue(v));
+  }
+  return concatBytes(parts);
+}
+
 // Hand-encode the fields map with integer keys. Accepts a Map or a plain
-// object; values are msgpack-encoded normally (arrays/bytes/strings work).
+// object; values are encoded via encodeFieldValue (Maps → int-keyed maps).
 function encodeFieldsMap(fields) {
   const entries = fields instanceof Map
     ? [...fields.entries()]
@@ -202,7 +228,7 @@ function encodeFieldsMap(fields) {
   const parts = [new Uint8Array([0x80 | entries.length])];     // fixmap header
   for (const [k, v] of entries) {
     parts.push(encodeIntKey(k));
-    parts.push(new Uint8Array(msgpackEncode(v)));
+    parts.push(encodeFieldValue(v));
   }
   return concatBytes(parts);
 }

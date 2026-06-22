@@ -41,6 +41,10 @@ const MSG_MAX_ATTEMPTS = 3;
 // etc. After MSG_MAX_ATTEMPTS attempts the row transitions to failed.
 const MSG_BACKOFF_MS = [5000, 15000, 60000];
 const MSG_RETRY_TICK_MS = 5000;
+
+// Tap-back reaction palette — same six emoji, in the same order, as
+// reticulum-mobile-app's REACTION_PALETTE for cross-client consistency.
+const REACTION_PALETTE = ['👍', '❤️', '😂', '😮', '😢', '🙏'];
 import { openDatabase, saveIdentity, loadIdentity, saveContact, getContact, getAllContacts, deleteContact, deleteMessagesForContact, saveMessage, getMessages, getAllMessages, getMessageById, updateMessage, saveNode, getNode, getAllNodes, deleteNode, deleteAllNodes, saveBookmark, getAllBookmarks, deleteBookmark, addHistory } from './store.js';
 
 const $ = id => document.getElementById(id);
@@ -2321,6 +2325,102 @@ function reactionString(v) {
   return null;
 }
 
+// Send a tap-back reaction (SPEC §5.9.8) to the conversation peer and apply
+// it locally so the user's own reaction appears immediately. `targetMsg` is
+// the stored message row being reacted to; it must carry a canonical
+// `messageId` (the raw 32-byte LXMF message_id, stored hex). Mirrors
+// reticulum-mobile-app's sendReaction: a standalone empty-body LXMF whose
+// fields[0x40] = {0x00: <raw 32B target id>, 0x01: <UTF-8 emoji>}. No
+// reactor identity is on the wire — attribution is our own source identity.
+async function sendReaction(targetMsg, emoji) {
+  if (!targetMsg || !targetMsg.messageId) {
+    log('err', 'Cannot react — message has no id (it predates reaction support).');
+    return;
+  }
+  const contact = contacts.get(targetMsg.contactHash);
+  if (!contact) { log('err', 'Reaction: conversation not found'); return; }
+  if (!contact.identity) {
+    log('err', 'Cannot react yet — peer has not announced; their public key is unknown.');
+    return;
+  }
+  const targetIdBytes = hexToBytes(targetMsg.messageId);
+  if (targetIdBytes.length !== 32) { log('err', 'Reaction: target id malformed'); return; }
+
+  // Apply locally first (idempotent), attributed to our own delivery hash —
+  // the user's own reaction should appear instantly regardless of delivery.
+  const myHex = toHex(myDestHash);
+  const reactions = targetMsg.reactions || {};
+  const senders = reactions[emoji] || [];
+  if (!senders.includes(myHex)) {
+    reactions[emoji] = [...senders, myHex];
+    await updateMessage(targetMsg.id, { reactions });
+    if (activeContactHash === targetMsg.contactHash) await renderMessages(activeContactHash);
+  }
+
+  // fields[0x40] = {0x00: target_id (raw 32B), 0x01: emoji (UTF-8)}. Maps
+  // (not objects) so lxmf.js hand-encodes the int keys (§5.9.8).
+  const fields = new Map([
+    [0x40, new Map([
+      [0x00, targetIdBytes],
+      [0x01, new TextEncoder().encode(emoji)],
+    ])],
+  ]);
+
+  try {
+    // Path-request preamble like sendMessage, so the reaction reaches a
+    // bridged/multi-hop peer instead of being dropped at the relay.
+    if (radioOn && !pathTable.has(toHex(contact.destHash))) {
+      await requestPath(contact.destHash);
+    }
+    const { payload } = await packMessage(myIdentity, contact.destHash, myDestHash, '', '', fields);
+    const recipientPub = contact.ratchetPub || contact.identity.encPubKey;
+    const encrypted = await encrypt(payload, recipientPub, contact.identity.hash);
+
+    // Same HEADER_1/HEADER_2 framing decision as sendMessage.
+    const pathInfo = pathTable.get(toHex(contact.destHash));
+    let packet;
+    if (pathInfo && pathInfo.hops >= 1 && upstreamTransportId) {
+      packet = buildPacket({
+        headerType: HEADER_2, transportType: TRANSPORT_TRANSPORT,
+        destType: DEST_SINGLE, packetType: PACKET_DATA,
+        destHash: contact.destHash, transportId: upstreamTransportId,
+        context: 0x00, payload: encrypted,
+      });
+    } else {
+      packet = buildPacket({
+        headerType: HEADER_1, destType: DEST_SINGLE, packetType: PACKET_DATA,
+        destHash: contact.destHash, context: 0x00, payload: encrypted,
+      });
+    }
+
+    // Reactions are tiny and should always fit one packet; on the rare
+    // chance they don't, fall back to a Link (no durable retry row).
+    if (packet.length > 500) {
+      if (radioOn) await sendLxmfOverLink(contact, '', '', fields);
+      else log('err', 'Reaction too large and radio is off.');
+      return;
+    }
+
+    // Durable shadow row so the retry tick + delivery-proof machinery
+    // apply exactly as for a text message. Flagged `isReaction` so
+    // renderMessages never draws it as its own (empty) bubble.
+    const packetHashHex = toHex(await computeOutboundPacketHashTruncated(packet));
+    const row = {
+      contactHash: targetMsg.contactHash, direction: 'outgoing',
+      content: '', title: '', timestamp: Date.now(),
+      state: radioOn ? MSG_STATE_SENDING : MSG_STATE_PENDING,
+      packetHash: packetHashHex, rawPacket: Array.from(packet),
+      isReaction: true, attempts: 0, nextRetryAt: 0,
+    };
+    const id = await saveMessage(row);
+    log('info', `Reacting "${emoji}" to message #${targetMsg.id}`);
+    if (radioOn) await doOutboundSend(id);
+    else log('info', '  Reaction queued (radio off)');
+  } catch (e) {
+    log('err', `Reaction send failed: ${e.message}`);
+  }
+}
+
 // Aggregate an inbound reaction onto its target message, dedup by
 // (reactor, emoji), and re-render. SPEC §5.9.8: receivers MUST aggregate
 // and MUST NOT render the reaction-carrying LXMF as a separate bubble.
@@ -3207,6 +3307,9 @@ async function renderMessages(contactHash) {
 
   list.innerHTML = '';
   for (const msg of ordered) {
+    // Reaction shadow rows are delivery bookkeeping only (SPEC §5.9.8 —
+    // the reaction-carrying LXMF is never its own bubble); skip them.
+    if (msg.isReaction) continue;
     const div = document.createElement('div');
     div.className = `message ${msg.direction}`;
     const ts = normalizeLxmfTimestamp(msg.timestamp);
@@ -3216,9 +3319,77 @@ async function renderMessages(contactHash) {
     const body = msg.content ? `<div class="message-text">${escapeHtml(msg.content)}</div>` : '';
     const reactions = renderReactions(msg.reactions);
     div.innerHTML = `${renderAttachment(msg.attachment)}${body}${reactions}<div class="meta">${time}${stateIcon}${rxMeta}</div>`;
+    // Tap-back affordance — only on incoming messages that carry a
+    // canonical id to target (mirrors the mobile app: no self-reactions,
+    // and rows received before reaction support have no messageId).
+    if (msg.direction === 'incoming' && msg.messageId) {
+      const rb = document.createElement('button');
+      rb.type = 'button';
+      rb.className = 'react-btn';
+      rb.title = 'React';
+      rb.textContent = '☺';
+      rb.addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        openReactionPicker(rb, msg);
+      });
+      div.appendChild(rb);
+    }
     list.appendChild(div);
   }
   list.scrollTop = list.scrollHeight;
+}
+
+// Floating tap-back emoji picker. Anchored to the clicked react button and
+// dismissed on outside click, Escape, or scroll. Single instance at a time.
+let _reactionPickerCleanup = null;
+function closeReactionPicker() {
+  const el = document.getElementById('reaction-picker');
+  if (el) el.remove();
+  if (_reactionPickerCleanup) { _reactionPickerCleanup(); _reactionPickerCleanup = null; }
+}
+function openReactionPicker(anchorEl, targetMsg) {
+  closeReactionPicker();
+  const picker = document.createElement('div');
+  picker.id = 'reaction-picker';
+  picker.className = 'reaction-picker';
+  for (const emoji of REACTION_PALETTE) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'reaction-pick';
+    b.textContent = emoji;
+    b.addEventListener('click', async (ev) => {
+      ev.stopPropagation();
+      closeReactionPicker();
+      await sendReaction(targetMsg, emoji);
+    });
+    picker.appendChild(b);
+  }
+  document.body.appendChild(picker);
+
+  // Position above the anchor (flip below if there's no room), clamped to
+  // the viewport. position:fixed → viewport coords, no scroll math.
+  const r = anchorEl.getBoundingClientRect();
+  const pw = picker.offsetWidth, ph = picker.offsetHeight;
+  let top = r.top - ph - 6;
+  if (top < 6) top = r.bottom + 6;
+  let left = r.left + r.width / 2 - pw / 2;
+  left = Math.max(6, Math.min(left, window.innerWidth - pw - 6));
+  picker.style.top = `${top}px`;
+  picker.style.left = `${left}px`;
+
+  const onOutside = (ev) => { if (!picker.contains(ev.target) && ev.target !== anchorEl) closeReactionPicker(); };
+  const onKey = (ev) => { if (ev.key === 'Escape') closeReactionPicker(); };
+  const onScroll = () => closeReactionPicker();
+  setTimeout(() => {
+    document.addEventListener('click', onOutside, true);
+    document.addEventListener('keydown', onKey);
+    const ml = $('message-list'); if (ml) ml.addEventListener('scroll', onScroll, { passive: true });
+  }, 0);
+  _reactionPickerCleanup = () => {
+    document.removeEventListener('click', onOutside, true);
+    document.removeEventListener('keydown', onKey);
+    const ml = $('message-list'); if (ml) ml.removeEventListener('scroll', onScroll);
+  };
 }
 
 // Render an attachment descriptor (image preview, file download, or audio

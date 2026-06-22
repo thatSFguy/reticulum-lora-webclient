@@ -719,6 +719,7 @@ a { color: var(--accent); }
 }
 
 .message {
+  position: relative;
   max-width: 70%;
   padding: 8px 12px;
   border-radius: 14px;
@@ -799,6 +800,62 @@ a { color: var(--accent); }
   background: rgba(0, 0, 0, 0.18);
   border-color: rgba(255, 255, 255, 0.25);
   color: rgba(255, 255, 255, 0.95);
+}
+
+/* Tap-back "react" affordance — sits just outside the bubble's right edge.
+   Hover-revealed on pointer devices; always faintly visible on touch. */
+.react-btn {
+  position: absolute;
+  top: 50%;
+  right: -30px;
+  transform: translateY(-50%);
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+  line-height: 1;
+  border: 0.5px solid var(--border);
+  border-radius: 50%;
+  background: var(--surface);
+  color: var(--text-2);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.12s ease, background 0.12s ease;
+}
+.message:hover .react-btn { opacity: 1; }
+.react-btn:hover { background: var(--surface-hover); color: var(--text); }
+@media (hover: none) {
+  .react-btn { opacity: 0.55; }
+}
+
+/* Floating emoji picker (one row, iMessage-style). */
+.reaction-picker {
+  position: fixed;
+  z-index: 2000;
+  display: flex;
+  gap: 2px;
+  padding: 4px 6px;
+  background: var(--surface-2);
+  border: 0.5px solid var(--border-strong);
+  border-radius: 20px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.25);
+}
+.reaction-pick {
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  font-size: 22px;
+  line-height: 1;
+  padding: 4px;
+  border-radius: 50%;
+  transition: transform 0.1s ease, background 0.1s ease;
+}
+.reaction-pick:hover {
+  background: var(--surface-hover);
+  transform: scale(1.2);
 }
 
 /* Compose */
