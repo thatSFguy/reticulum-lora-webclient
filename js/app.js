@@ -113,6 +113,7 @@ let activeContactHash = null;
 // every announced identity).
 const conversedHashes = new Set();
 let nodeFilter = 'all';  // Nodes-view filter: all | messagable | contacts | nodes
+let stagedAttachment = null;  // { fields, descriptor } pending until Send (allows a caption)
 let radioOn = false;
 let links = new Map();     // hex link_id → Link instance (responder / incoming)
 let initiatorLinks = new Map();  // hex link_id → { link, contact, resolve, reject, timer }
@@ -1976,10 +1977,39 @@ async function sendMessage() {
   if (!activeContactHash) return;
 
   const content = $('msg-content').value.trim();
-  if (!content) return;
-
   const contact = contacts.get(activeContactHash);
   if (!contact) { log('err', 'Contact not found'); return; }
+
+  // Attachment (with optional caption) — delivered over a Link as a Resource.
+  if (stagedAttachment) {
+    const warn = (m) => { try { alert(m); } catch (_) { /* no-op */ } log('err', m); };
+    if (!contact.identity) { warn('Recipient public key unknown — wait for their announce.'); return; }
+    if (!radioOn) { warn('Connect to a transport first to send attachments.'); return; }
+    const { fields, descriptor } = stagedAttachment;
+    const row = {
+      contactHash: activeContactHash, direction: 'outgoing',
+      content, title: '', timestamp: Date.now(),
+      state: MSG_STATE_SENDING, attachment: descriptor, attempts: 0, nextRetryAt: 0,
+    };
+    const id = await saveMessage(row);
+    conversedHashes.add(activeContactHash);
+    clearStagedAttachment();
+    $('msg-content').value = '';
+    await renderMessages(activeContactHash);
+    log('info', `Sending ${descriptor.kind} "${descriptor.name}"${content ? ' + caption' : ''} to "${contact.displayName}"…`);
+    try {
+      const delivered = await sendLxmfOverLink(contact, content, '', fields);
+      await updateMessage(id, { state: delivered ? MSG_STATE_DELIVERED : MSG_STATE_SENT });
+    } catch (e) {
+      await updateMessage(id, { state: MSG_STATE_FAILED, lastError: e.message });
+      log('err', `Attachment send failed: ${e.message}`);
+    }
+    if (activeContactHash === row.contactHash) await renderMessages(activeContactHash);
+    return;
+  }
+
+  // Plain text (opportunistic single packet).
+  if (!content) return;
   if (!contact.identity) {
     log('err', 'Cannot reply yet — peer has not announced; their public key is unknown. Wait for their next announce, then try again.');
     return;
@@ -2182,65 +2212,64 @@ async function sendLxmfOverLink(contact, content, title, fields) {
 }
 
 // Attach + send a file (image or generic file) to the active conversation.
-async function sendAttachment(file) {
-  // Surface why an attachment can't be sent instead of failing silently.
-  const fail = (msg) => { log('err', msg); try { alert(msg); } catch (_) { /* no-op */ } };
+// Read a picked file into an LXMF field + a renderable descriptor (does not
+// send). Images are downscaled for LoRa; an image that can't be decoded
+// (e.g. iPhone HEIC) falls back to a generic file attachment.
+async function prepareAttachment(file) {
+  const fields = new Map();
+  let descriptor;
+  let asImage = false;
+  if (file.type.startsWith('image/')) {
+    try {
+      const { bytes, ext, dataUrl } = await resizeImage(file);
+      fields.set(0x06, [ext, bytes]);                    // FIELD_IMAGE = [ext, bytes]
+      descriptor = { kind: 'image', name: file.name, mime: 'image/jpeg', size: bytes.length, dataUrl };
+      asImage = true;
+    } catch (imgErr) {
+      log('info', `  Image decode failed (${imgErr.message}); attaching as a raw file`);
+    }
+  }
+  if (!asImage) {
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    const name = sanitizeFilename(file.name);
+    fields.set(0x05, [[name, bytes]]);                   // FIELD_FILE_ATTACHMENTS = [[name, bytes]]
+    descriptor = { kind: 'file', name, mime: file.type || 'application/octet-stream', size: bytes.length, dataUrl: await blobToDataUrl(file) };
+  }
+  return { fields, descriptor };
+}
 
+// Stage a picked file in the composer so the user can add a caption before
+// sending (sendMessage delivers caption + attachment together).
+async function stageAttachment(file) {
+  const fail = (msg) => { log('err', msg); try { alert(msg); } catch (_) { /* no-op */ } };
   if (!activeContactHash) { fail('Open a conversation first, then attach.'); return; }
   const contact = contacts.get(activeContactHash);
   if (!contact || !contact.identity) {
     fail('Can’t attach: this contact’s public key isn’t known yet. Wait for their announce, or add them from a contact card.');
     return;
   }
-  if (!radioOn) { fail('Connect to a transport first to send attachments.'); return; }
-
-  let fields = new Map();
-  let descriptor;
   try {
-    // Try to treat it as an image (downscale for LoRa). If decoding fails —
-    // e.g. iPhone HEIC, which createImageBitmap can't read — fall back to
-    // sending the original bytes as a generic file rather than dropping it.
-    let sentAsImage = false;
-    if (file.type.startsWith('image/')) {
-      try {
-        const { bytes, ext, dataUrl } = await resizeImage(file);
-        fields.set(0x06, [ext, bytes]);                  // FIELD_IMAGE = [ext, bytes]
-        descriptor = { kind: 'image', name: file.name, mime: 'image/jpeg', size: bytes.length, dataUrl };
-        sentAsImage = true;
-      } catch (imgErr) {
-        log('info', `  Image decode failed (${imgErr.message}); sending as a raw file`);
-      }
-    }
-    if (!sentAsImage) {
-      const bytes = new Uint8Array(await file.arrayBuffer());
-      const name = sanitizeFilename(file.name);
-      fields.set(0x05, [[name, bytes]]);                 // FIELD_FILE_ATTACHMENTS = [[name, bytes]]
-      descriptor = { kind: 'file', name, mime: file.type || 'application/octet-stream', size: bytes.length, dataUrl: await blobToDataUrl(file) };
-    }
-  } catch (e) {
-    fail(`Could not read attachment: ${e.message}`);
-    return;
-  }
+    stagedAttachment = await prepareAttachment(file);
+  } catch (e) { fail(`Could not read attachment: ${e.message}`); return; }
+  renderStagedAttachment();
+  $('msg-content')?.focus();
+}
 
-  const row = {
-    contactHash: activeContactHash, direction: 'outgoing',
-    content: '', title: '', timestamp: Date.now(),
-    state: MSG_STATE_SENDING, attachment: descriptor, attempts: 0, nextRetryAt: 0,
-  };
-  const id = await saveMessage(row);
-  conversedHashes.add(activeContactHash);
-  await renderMessages(activeContactHash);
+function clearStagedAttachment() { stagedAttachment = null; renderStagedAttachment(); }
 
-  log('info', `Sending ${descriptor.kind} "${descriptor.name}" (${descriptor.size}B) to "${contact.displayName}"…`);
-  try {
-    const delivered = await sendLxmfOverLink(contact, '', '', fields);
-    await updateMessage(id, { state: delivered ? MSG_STATE_DELIVERED : MSG_STATE_SENT });
-    log('ok', `Attachment ${delivered ? 'delivered' : 'sent'}`);
-  } catch (e) {
-    await updateMessage(id, { state: MSG_STATE_FAILED, lastError: e.message });
-    log('err', `Attachment send failed: ${e.message}`);
-  }
-  if (activeContactHash === row.contactHash) await renderMessages(activeContactHash);
+function renderStagedAttachment() {
+  const el = $('staged-attachment');
+  if (!el) return;
+  if (!stagedAttachment) { el.classList.add('hidden'); el.innerHTML = ''; return; }
+  const d = stagedAttachment.descriptor;
+  const thumb = d.kind === 'image'
+    ? `<img class="staged-thumb" src="${d.dataUrl}" alt="">`
+    : '<span class="staged-icon">📎</span>';
+  el.innerHTML = `${thumb}<span class="staged-name">${escapeHtml(d.name)}</span>` +
+    `<span class="staged-size">${(d.size / 1024).toFixed(1)} KB</span>` +
+    `<button id="staged-remove" class="staged-remove" title="Remove attachment">×</button>`;
+  el.classList.remove('hidden');
+  $('staged-remove')?.addEventListener('click', clearStagedAttachment);
 }
 
 // Extract a renderable attachment descriptor from a decoded LXMF fields map.
@@ -2921,6 +2950,7 @@ async function removeContact(hash) {
 
 async function selectContact(hash) {
   activeContactHash = hash;
+  clearStagedAttachment();  // don't carry a staged file into a different conversation
   const c = contacts.get(hash);
   if (c) c.unreadCount = 0;
   $('conv-title').textContent = c ? c.displayName : hash.substring(0, 16);
@@ -3571,8 +3601,8 @@ $('msg-content').addEventListener('keydown', (e) => {
 $('btn-attach')?.addEventListener('click', () => $('attach-input')?.click());
 $('attach-input')?.addEventListener('change', (e) => {
   const f = e.target.files && e.target.files[0];
-  if (f) sendAttachment(f);
-  e.target.value = '';  // allow re-picking the same file
+  if (f) stageAttachment(f);          // stage; sent (with optional caption) on Send
+  e.target.value = '';                // allow re-picking the same file
 });
 
 // Log

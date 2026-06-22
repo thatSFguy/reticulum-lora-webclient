@@ -1834,3 +1834,26 @@ textarea:focus {
 .att-file:hover { background: var(--surface-2); }
 .att-size { color: var(--text-muted); font-size: 11px; }
 .message.outgoing .att-file { background: rgba(255,255,255,0.18); color: var(--bubble-out-text); }
+
+/* ---- Staged attachment (pending in the composer) ------------------- */
+.compose { flex-wrap: wrap; }
+.staged-attachment {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  margin-bottom: 6px;
+  background: var(--surface-hover);
+  border-radius: 8px;
+  font-size: 12px;
+}
+.staged-thumb { width: 32px; height: 32px; border-radius: 5px; object-fit: cover; flex: 0 0 auto; }
+.staged-icon { font-size: 18px; }
+.staged-name { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.staged-size { color: var(--text-muted); flex: 0 0 auto; }
+.staged-remove {
+  flex: 0 0 auto; border: none; background: none; cursor: pointer;
+  color: var(--text-muted); font-size: 16px; line-height: 1; padding: 0 4px;
+}
+.staged-remove:hover { color: var(--err); }
