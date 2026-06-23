@@ -342,6 +342,28 @@
         </div>
       </div>
 
+      <!-- Announce interval -->
+      <div class="settings-card">
+        <h3 class="settings-card-title">Announce Interval</h3>
+        <p class="settings-card-hint">
+          How often this client re-announces its address so peers and transit
+          nodes keep a path back to you. Set per connection type: LoRa is
+          bandwidth-limited but must outpace path-table expiry, so it announces
+          more often; TCP peers keep paths fresh between announces. Changes
+          apply live to the active connection.
+        </p>
+        <div class="row">
+          <div class="field narrow">
+            <label>LoRa (BLE/USB), min</label>
+            <input id="cfg-announce-lora" type="number" min="1" max="120" value="5">
+          </div>
+          <div class="field narrow">
+            <label>TCP (rnsd), min</label>
+            <input id="cfg-announce-tcp" type="number" min="1" max="120" value="15">
+          </div>
+        </div>
+      </div>
+
       <!-- Appearance -->
       <div class="settings-card">
         <h3 class="settings-card-title">Appearance</h3>

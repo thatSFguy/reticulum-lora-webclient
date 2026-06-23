@@ -128,6 +128,51 @@ const PATH_REQUEST_DEDUP_MAX = 256; // Cap on the dedup table; upstream caps at 
                                     // leaf only sees requests for itself, so a small ring is fine
 let announceTimer = null;  // setInterval handle for the periodic announce
 let outboundRetryTimer = null;  // setInterval handle for the outbound retry tick
+let activeTransport = null;  // 'ble' | 'serial' | 'ws' — set on connect; picks the announce cadence
+
+// Periodic announce cadence, configurable per transport class in Settings.
+// LoRa (BLE/Serial via RNode) is bandwidth-starved but must outpace transit-
+// node path-table TTLs, so it defaults faster; TCP (rnsd) peers keep cached
+// paths fresh between announces, so it can be sparser. Stored in minutes under
+// these keys. Spec guidance (reticulum-specifications SPEC.md §9.7): 5–10 min
+// for low-MTU LoRa, 15–30 min for an always-on rnsd-on-IP relay; avoid < 60s
+// (triggers ingress rate-limiting) and > 30 min on lossy links.
+const ANNOUNCE_INTERVAL_DEFAULTS = { lora: 5, tcp: 15 };  // minutes
+const ANNOUNCE_INTERVAL_KEYS = { lora: 'rlw.announceMinsLora', tcp: 'rlw.announceMinsTcp' };
+const ANNOUNCE_INTERVAL_MIN = 1;    // minutes — floor (keeps us above the 60s rate-limit cliff)
+const ANNOUNCE_INTERVAL_MAX = 120;  // minutes — ceiling
+
+// Which announce-interval class a transport id falls into.
+function announceClass(transport) {
+  return transport === 'ws' ? 'tcp' : 'lora';
+}
+
+// Configured announce interval (ms) for a class, falling back to the default
+// when unset/invalid and clamped to [MIN, MAX].
+function announceIntervalMs(cls) {
+  let mins = ANNOUNCE_INTERVAL_DEFAULTS[cls];
+  try {
+    const raw = parseFloat(localStorage.getItem(ANNOUNCE_INTERVAL_KEYS[cls]));
+    if (Number.isFinite(raw) && raw > 0) mins = raw;
+  } catch (_) { /* private mode — use default */ }
+  mins = Math.min(Math.max(mins, ANNOUNCE_INTERVAL_MIN), ANNOUNCE_INTERVAL_MAX);
+  return mins * 60 * 1000;
+}
+
+// (Re)start the periodic announce timer for the active transport's class.
+// Safe to call repeatedly — clears any existing timer first — so the Settings
+// inputs can apply a new cadence live without a reconnect. Returns the chosen
+// interval in ms.
+function startAnnounceTimer() {
+  if (announceTimer) clearInterval(announceTimer);
+  const intervalMs = announceIntervalMs(announceClass(activeTransport));
+  announceTimer = setInterval(() => {
+    if (radioOn) {
+      sendAnnounce().catch(e => log('info', `Periodic announce skipped: ${e.message}`));
+    }
+  }, intervalMs);
+  return intervalMs;
+}
 
 // Contact-list filter state. Persists across reloads via localStorage so a
 // user who pinned a few peers and toggled "Pinned only" doesn't have to
@@ -3836,6 +3881,7 @@ function tcpConnect() {
 async function connect(transportType) {
   try {
     setConnectButtonsDisabled(true);
+    activeTransport = transportType;  // drives the per-transport announce cadence
 
     // Pick the right interface based on transport type.
     //   'ble' / 'serial' → RNode-over-KISS (owns a radio)
@@ -3936,12 +3982,8 @@ function markInterfaceReady() {
   radioOn = true;
   setRadioStatus('Ready', true);
   sendAnnounce().catch(e => log('info', `Startup announce skipped: ${e.message}`));
-  if (announceTimer) clearInterval(announceTimer);
-  announceTimer = setInterval(() => {
-    if (radioOn) {
-      sendAnnounce().catch(e => log('info', `Periodic announce skipped: ${e.message}`));
-    }
-  }, 5 * 60 * 1000);
+  const intervalMs = startAnnounceTimer();
+  log('info', `Periodic announce every ${Math.round(intervalMs / 60000)} min (${announceClass(activeTransport).toUpperCase()})`);
   if (outboundRetryTimer) clearInterval(outboundRetryTimer);
   outboundRetryTimer = setInterval(() => {
     outboundRetryTick().catch(e => log('info', `Retry tick error: ${e.message}`));
@@ -4384,6 +4426,36 @@ try {
   }
   if ($('ws-rnsd')) $('ws-rnsd').value = savedRnsd;
 }
+
+// Restore the per-transport announce intervals into the Settings inputs and
+// persist any edit. Editing while connected restarts the live timer so the new
+// cadence takes effect without a reconnect.
+(function initAnnounceIntervalUI() {
+  const fields = [
+    { id: 'cfg-announce-lora', cls: 'lora' },
+    { id: 'cfg-announce-tcp',  cls: 'tcp' },
+  ];
+  for (const f of fields) {
+    const el = $(f.id);
+    if (!el) continue;
+    try {
+      const saved = localStorage.getItem(ANNOUNCE_INTERVAL_KEYS[f.cls]);
+      if (saved !== null && saved !== '') el.value = saved;
+    } catch (_) { /* private mode — keep the HTML default */ }
+    el.addEventListener('change', () => {
+      let mins = parseFloat(el.value);
+      if (!Number.isFinite(mins) || mins < ANNOUNCE_INTERVAL_MIN) mins = ANNOUNCE_INTERVAL_MIN;
+      if (mins > ANNOUNCE_INTERVAL_MAX) mins = ANNOUNCE_INTERVAL_MAX;
+      el.value = String(mins);
+      try { localStorage.setItem(ANNOUNCE_INTERVAL_KEYS[f.cls], String(mins)); } catch (_) { /* private mode */ }
+      // Apply live if the running timer belongs to this transport class.
+      if (announceTimer && radioOn && announceClass(activeTransport) === f.cls) {
+        startAnnounceTimer();
+        log('info', `Announce cadence updated to ${mins} min (${f.cls.toUpperCase()})`);
+      }
+    });
+  }
+})();
 
 // ---- Init ------------------------------------------------------------
 updateAvatars();
