@@ -5,6 +5,7 @@
 import { encode as msgpackEncode } from '@msgpack/msgpack';
 import { RNode } from './rnode.js';
 import { RnsdInterface } from './rnsd-interface.js';
+import { AlnInterface } from './aln-interface.js';
 import { toHex } from './kiss.js';
 import { Identity, computeDestinationHash, computeNameHash, truncatedHash } from './identity.js';
 import { parsePacket, buildPacket, PACKET_ANNOUNCE, PACKET_DATA, PACKET_LINKREQ, PACKET_PROOF, DEST_SINGLE, DEST_LINK, DEST_PLAIN, HEADER_1, HEADER_2, TRANSPORT_BROADCAST, TRANSPORT_TRANSPORT, PACKET_TYPE_NAMES } from './reticulum.js';
@@ -3897,7 +3898,14 @@ async function connect(transportType) {
     // Pick the right interface based on transport type.
     //   'ble' / 'serial' → RNode-over-KISS (owns a radio)
     //   'ws'             → rnsd-over-HDLC (no radio, direct to a Reticulum daemon)
-    if (transportType === 'ws') {
+    //   'aln'            → agnostic-LoRa-Net tunnel over BLE (mesh carries RNS)
+    if (transportType === 'aln') {
+      // Tunnel raw RNS packets over an ALN mesh node via Web Bluetooth. The
+      // optional peer node id (Settings) directs delivery; blank = broadcast.
+      let peer = '';
+      try { peer = (localStorage.getItem('rlw.alnPeer') || '').trim(); } catch (_) {}
+      rnode = new AlnInterface(peer);
+    } else if (transportType === 'ws') {
       // The Go bridge takes the rnsd target per-connection via query params
       // (?host=X&port=Y) and REJECTS a WS with no target (HTTP 400). The
       // Python bridge ignores the query and uses its own flags, so the same
@@ -3965,10 +3973,12 @@ async function connect(transportType) {
       log('ok', `RNode FW ${fw?.major}.${fw?.minor}, Bat ${battery}%`);
       await startRadio();
     } else {
-      // WebSocket path: no radio config, no detect, no battery.
-      // Go straight to the "ready for messaging" state that
-      // startRadio would have reached for the RNode path.
-      log('ok', `Connected to Reticulum network via WebSocket`);
+      // No-radio paths (WebSocket→rnsd, ALN mesh tunnel): no radio config,
+      // no detect, no battery. Go straight to the "ready for messaging" state
+      // that startRadio would have reached for the RNode path.
+      log('ok', transportType === 'aln'
+        ? `Connected to Reticulum network via ALN mesh`
+        : `Connected to Reticulum network via WebSocket`);
       markInterfaceReady();
     }
   } catch (e) {
@@ -4466,6 +4476,27 @@ try {
       }
     });
   }
+})();
+
+// Restore + persist the optional ALN peer node id (blank = broadcast). Read by
+// connect('aln') at connect time, so an edit applies on the next ALN connect.
+(function initAlnPeerUI() {
+  const el = $('cfg-aln-peer');
+  if (!el) return;
+  try {
+    const saved = localStorage.getItem('rlw.alnPeer');
+    if (saved) el.value = saved;
+  } catch (_) { /* private mode — keep blank */ }
+  el.addEventListener('change', () => {
+    const v = el.value.trim().replace(/^0x/i, '').replace(/\s+/g, '');
+    if (v !== '' && !/^[0-9a-fA-F]{32}$/.test(v)) {
+      log('err', 'ALN peer id must be 32 hex chars (a v2 node id), or blank for broadcast');
+      return;
+    }
+    el.value = v;
+    try { localStorage.setItem('rlw.alnPeer', v); } catch (_) { /* private mode */ }
+    log('info', v ? `ALN peer set to ${v.toUpperCase()}` : 'ALN peer cleared — broadcasting to all mesh nodes');
+  });
 })();
 
 // ---- Init ------------------------------------------------------------
