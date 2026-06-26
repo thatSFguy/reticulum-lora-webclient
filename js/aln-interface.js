@@ -33,8 +33,9 @@ import { encodeFrame } from './hdlc.js';
 import { NusDemux } from './nus-demux.js';
 import { AlnRouter } from './aln-router.js';
 import {
-  encodeLocatorFrame, decodeFrame, sourceFromFrame, locatorFromHex,
+  encodeLocatorFrame, decodeFrame, sourceFromFrame, locatorFromHex, toHexUpper,
 } from './aln-tunnel.js';
+import { parsePacket, PACKET_TYPE_NAMES } from './reticulum.js';
 
 const POLL_TICK_MS       = 5_000;     // resolve retries while sends are buffered
 const DIRDUMP_INTERVAL_MS = 600_000;  // slow re-enumeration safety net
@@ -120,16 +121,26 @@ export class AlnInterface {
   async sendPacket(data) {
     if (!this.transport.connected) throw new Error('ALN not connected');
     const bytes = data instanceof Uint8Array ? data : new Uint8Array(data);
+    const info = this._describe(bytes);
     const d = await this.router.routeOutbound(bytes, Date.now());
     if (d.kind === 'send') {
+      this._log(`ALN tx: ${info} → ${d.targets.join(', ')}`);
       for (const node of d.targets) await this._writeTunnelFrame(node, bytes);
     } else if (d.kind === 'buffered') {
       const wanted = this.router.resolveWanted();
-      this._log(`ALN: buffered ${bytes.length}B until destination resolves (${wanted.length} wanted)`);
+      this._log(`ALN tx: ${info} BUFFERED — no route to dest yet; resolving ${wanted.slice(0, 4).join(', ') || '(none)'}`);
       for (const id of wanted.slice(0, 4)) await this._writeText(`resolve ${id}`);
     } else {
-      this._log(`ALN: deferred ${bytes.length}B — ${d.reason}`);
+      this._log(`ALN tx: ${info} DEFERRED — ${d.reason}`);
     }
+  }
+
+  // One-line packet summary for TX/RX logging: type + RNS dest hash + size.
+  _describe(bytes) {
+    let p = null;
+    try { p = parsePacket(bytes); } catch (_) { /* fall through */ }
+    if (!p) return `${bytes.length}B unparseable`;
+    return `${PACKET_TYPE_NAMES[p.packetType] || 'PKT'} dest=${toHexUpper(p.destHash).slice(0, 12)} (${bytes.length}B)`;
   }
 
   // ---- inbound -------------------------------------------------------
